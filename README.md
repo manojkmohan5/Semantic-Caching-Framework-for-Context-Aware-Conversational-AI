@@ -1,83 +1,102 @@
-# Semantic Caching Framework for Context-Aware Conversational AI
+# Semantic Caching Framework for Conversational AI
 
-A conversational AI cache that reduces redundant LLM calls by detecting semantically similar user queries across multi-turn chats using context-aware embeddings.
+A context-aware semantic cache for conversational AI. Uses embeddings to find similar previous queries and serves cached responses, minimizing redundant calls to the Gemini API.
 
-# How It Works
-The system combines recent conversation history with a user's current query to generate an embedding that captures semantic meaning. When a similar question is asked (even if phrased differently), it returns a cached LLM response instead of calling the Gemini API again.
+---
 
-# Setup
-Requirements: Python 3.8+, Google Gemini API key
+## Requirements
 
-Clone this repository and navigate to the project folder.
+- Python 3.8+
+- Google Gemini API key
 
-# Create a virtual environment:
+---
 
-bash/terminal:
-python -m venv venv
+## # Execution Steps
 
-# For Windows:
-venv\Scripts\activate
+### # 1. Clone the repository
 
-# For Mac/Linux:
-source venv/bin/activate
-Install dependencies:
-
-bash/teminal:
-pip install -r requirements.txt
-Create a .env file in the project root like this:
-
-text:
-GEMINI_API_KEY=your_api_key_here
-Usage
-Run the main script:
-
-bash/terminal:
-python src/main.py
-You'll be prompted for a session ID (can use any name), and then you can chat. The system will show [Cache Hit] or [Cache Miss] for each query depending on whether a similar answer is already cached.
-
-# Example:
+git clone https://github.com/yourusername/Semantic-Caching-Framework-for-Context-Aware-Conversational-AI.git
+cd Semantic-Caching-Framework-for-Context-Aware-Conversational-AI
 
 text
+
+### # 2. Create and activate a virtual environment
+
+**Windows:**
+python -m venv venv
+venv\Scripts\activate
+
+text
+**Mac/Linux:**
+python3 -m venv venv
+source venv/bin/activate
+
+text
+
+### # 3. Install dependencies
+
+pip install -r requirements.txt
+
+text
+
+### # 4. Set up your environment variables
+
+1. Copy `.env.example` to `.env`
+2. Add your Gemini API key:
+    ```
+    GEMINI_API_KEY=your_actual_key_here
+    ```
+
+### # 5. Run the application
+
+Make sure your virtual environment is activated, then run:
+python src/main.py
+
+text
+
+### # 6. Start chatting
+
+- When prompted, enter any session ID (ex: your name)
+- The app will display `[Cache Hit]` or `[Cache Miss]` depending on whether your question has a similar cached response.
+
+---
+
+## # Example Interaction
+
 You: What is the impact of climate change on corn yields?
 [Cache Miss] Calling Gemini...
-Gemini: (detailed response...)
+Gemini: (detailed answer...)
 
 You: What about wheat?
 [Cache Miss] Calling Gemini...
-Gemini: (response...)
+Gemini: (answer...)
 
 You: How does climate change affect wheat?
 [Cache Hit]
-Gemini: (cached wheat response...)
-Environment Variables
-Your .env file should contain:
+Gemini: (cached wheat answer...)
 
 text
+
+---
+
+## # Environment Variables
+
+Your `.env` file should look like:
 GEMINI_API_KEY=your_actual_api_key
-Get your free API key from Google AI Studio.
 
-# Design Notes
-Uses the last 3 conversation turns plus the current query to build embeddings.
+text
+**Never commit your real API key. Use `.env.example` for sharing.**
 
-Cache threshold is set at 0.85 cosine similarity (can be changed in cache.py).
+---
 
-Each session ID keeps conversations and caches separate.
+## # Dependencies
 
-Embeddings: Google's text-embedding-004 model.
+See `requirements.txt`:
+- requests
+- python-dotenv
+- numpy
+- faiss-cpu
+- tqdm
+- pandas
 
-LLM: Google's gemini-2.5-pro model.
-
-# Dependencies
-Listed in requirements.txt:
-
-requests
-
-python-dotenv
-
-numpy
-
-faiss-cpu
-
-tqdm
-
-pandas
+---
