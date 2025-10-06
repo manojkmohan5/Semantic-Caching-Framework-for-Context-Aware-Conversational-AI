@@ -1,4 +1,5 @@
-Semantic Caching Framework
+Semantic Caching Framework for Context-Aware Conversational AI
+
 A conversational AI cache that reduces redundant LLM calls by detecting semantically similar user queries across multi-turn chats using context-aware embeddings.
 
 How It Works
