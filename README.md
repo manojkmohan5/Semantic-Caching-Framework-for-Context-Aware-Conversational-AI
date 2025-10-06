@@ -71,8 +71,13 @@ LLM: Google's gemini-2.5-pro model.
 Listed in requirements.txt:
 
 requests
+
 python-dotenv
+
 numpy
+
 faiss-cpu
+
 tqdm
+
 pandas
