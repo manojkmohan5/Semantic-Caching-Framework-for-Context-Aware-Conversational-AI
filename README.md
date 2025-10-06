@@ -17,7 +17,6 @@ A context-aware semantic cache for conversational AI. Uses embeddings to find si
 
 git clone https://github.com/manojkmohan5/Semantic-Caching-Framework-for-Context-Aware-Conversational-AI?tab=readme-ov-file
 
-text
 
 ### # 2. Create and activate a virtual environment
 
@@ -25,18 +24,15 @@ text
 python -m venv venv
 venv\Scripts\activate
 
-text
 **Mac/Linux:**
 python3 -m venv venv
 source venv/bin/activate
 
-text
 
 ### # 3. Install dependencies
 
 pip install -r requirements.txt
 
-text
 
 ### # 4. Set up your environment variables
 
@@ -51,7 +47,6 @@ text
 Make sure your virtual environment is activated, then run:
 python src/main.py
 
-text
 
 ### # 6. Start chatting
 
@@ -74,7 +69,6 @@ You: How does climate change affect wheat?
 [Cache Hit]
 Gemini: (cached wheat answer...)
 
-text
 
 ---
 
@@ -83,7 +77,6 @@ text
 Your `.env` file should look like:
 GEMINI_API_KEY=your_actual_api_key
 
-text
 **Never commit your real API key. Use `.env.example` for sharing.**
 
 ---
