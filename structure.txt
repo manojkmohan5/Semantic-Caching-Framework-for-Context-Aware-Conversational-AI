@@ -1,0 +1,17 @@
+semantic-caching-framework/
+│
+├── src/
+│   ├── cache.py
+│   ├── session_manager.py
+│   ├── gemini_client.py
+│   ├── main.py
+│   └── utils.py
+│
+├── tests/
+│   └── test_cache.py
+│
+├── README.md
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── metrics_report.md
