@@ -81,7 +81,6 @@ Gemini: (cached wheat answer...)
 Your `.env` file should look like:
 GEMINI_API_KEY=your_actual_api_key
 
-**Never commit your real API key. Use `.env.example` for sharing.**
 
 ---
 
