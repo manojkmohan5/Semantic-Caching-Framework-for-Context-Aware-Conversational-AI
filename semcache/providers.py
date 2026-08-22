@@ -48,6 +48,23 @@ CATALOG: dict[str, list[ModelInfo]] = {
     ],
 }
 
+#: Providers that speak the OpenAI wire format. They all work through the same
+#: client -- only the base URL differs -- so supporting them costs a dict rather
+#: than a new provider class each. Override any of these with --base-url.
+OPENAI_COMPATIBLE = {
+    "grok": "https://api.x.ai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "kimi": "https://api.moonshot.ai/v1",
+    "glm": "https://open.bigmodel.cn/api/paas/v4",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "together": "https://api.together.xyz/v1",
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+    "custom": "",  # requires --base-url
+}
+
 EMBEDDING_MODELS = {
     "openai": ("text-embedding-3-small", 1536),
     "gemini": ("gemini-embedding-001", 3072),
@@ -63,6 +80,12 @@ def detect_provider(api_key: str) -> str | None:
         return "openai"
     if key.startswith("AIza"):
         return "gemini"
+    if key.startswith("nvapi-"):
+        return "nvidia"
+    if key.startswith("xai-"):
+        return "grok"
+    # DeepSeek, Kimi and most OpenAI-compatible hosts also issue "sk-..." keys,
+    # so a prefix cannot tell them apart from OpenAI. Those need --provider.
     return None
 
 
@@ -77,6 +100,12 @@ def model_info(provider: str, model: str) -> ModelInfo:
     # A model we do not know about is still usable -- we just cannot price it,
     # and we must not assume it tolerates `temperature`.
     return ModelInfo(model, "custom", None, None, provider != "anthropic")
+
+
+def needs_explicit_model(provider: str) -> bool:
+    """OpenAI-compatible hosts each have their own model names, which change
+    often. Rather than ship a guess that 400s, ask once and save it."""
+    return provider in OPENAI_COMPATIBLE
 
 
 # --------------------------------------------------------------------- results
@@ -137,10 +166,12 @@ class Provider:
 
     name = "base"
 
-    def __init__(self, api_key: str, model: str, cfg):
+    def __init__(self, api_key: str, model: str, cfg, base_url: str | None = None):
         self.api_key = api_key
         self.model = model
         self.cfg = cfg
+        #: Set for OpenAI-compatible hosts (DeepSeek, Kimi, GLM, NVIDIA, Ollama...).
+        self.base_url = base_url
         self.result: ChatResult | None = None
 
     def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
@@ -211,11 +242,15 @@ class OpenAIProvider(Provider):
                 'openai SDK not installed. Run: pip install "semcache[openai]"', "error"
             ) from exc
         self._sdk = openai
-        return openai.OpenAI(
-            api_key=self.api_key,
-            timeout=self.cfg.timeout_read,
-            max_retries=self.cfg.max_retries,
-        )
+        kwargs = {
+            "api_key": self.api_key or "not-needed",
+            "timeout": self.cfg.timeout_read,
+            "max_retries": self.cfg.max_retries,
+        }
+        base_url = self.base_url or getattr(self.cfg, "base_url", None)
+        if base_url:
+            kwargs["base_url"] = base_url
+        return openai.OpenAI(**kwargs)
 
     def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
         client = self._client()
@@ -366,11 +401,27 @@ _CLASSES = {
 def build_provider(provider: str, api_key: str, model: str, cfg) -> Provider:
     if cfg is not None and getattr(cfg, "offline", False):
         return StubProvider(cfg=cfg)
+
+    if provider in OPENAI_COMPATIBLE:
+        base_url = getattr(cfg, "base_url", None) or OPENAI_COMPATIBLE[provider]
+        if not base_url:
+            raise ProviderError(
+                f"{provider} needs an endpoint. Pass --base-url https://...", "error"
+            )
+        host = OpenAIProvider(api_key, model, cfg, base_url=base_url)
+        host.name = provider  # so metrics and /stats say "deepseek", not "openai"
+        return host
+
     try:
         cls = _CLASSES[provider]
     except KeyError:
-        raise ProviderError(f"unknown provider {provider!r}", "error") from None
+        known = ", ".join([*_CLASSES, *OPENAI_COMPATIBLE])
+        raise ProviderError(f"unknown provider {provider!r}. Known: {known}", "error") from None
     return cls(api_key, model, cfg)
+
+
+def all_provider_names() -> list[str]:
+    return [*CATALOG, *OPENAI_COMPATIBLE]
 
 
 # ------------------------------------------------------- exception translation

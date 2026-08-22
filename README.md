@@ -71,6 +71,37 @@ The key is read from `--api-key`, then `SEMCACHE_API_KEY`, then
 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`, then `.env` — so in
 CI or Docker you never see a prompt at all.
 
+## Providers
+
+Three native SDK paths, plus every OpenAI-compatible host through one client:
+
+| | how |
+|---|---|
+| Anthropic, OpenAI, Google Gemini | detected from the key, native SDK |
+| **Grok** (xAI) | `--provider grok` — detected from `xai-...` keys |
+| **DeepSeek** | `--provider deepseek --model deepseek-chat` |
+| **Kimi** (Moonshot) | `--provider kimi --model kimi-k2-0905-preview` |
+| **GLM** (Zhipu) | `--provider glm --model glm-4.6` |
+| **NVIDIA NIM** | `--provider nvidia` — detected from `nvapi-...` keys |
+| Groq, OpenRouter, Together | `--provider groq` / `openrouter` / `together` |
+| Ollama, LM Studio (local) | `--provider ollama` / `lmstudio` |
+| anything else | `--provider custom --base-url https://your-host/v1` |
+
+```bash
+semcache --provider grok --model grok-4
+semcache --provider deepseek --model deepseek-chat
+semcache --provider ollama --model llama3.1 --embedder local   # fully offline
+```
+
+`--base-url` overrides any preset, so a corporate gateway or proxy works too.
+Only `xai-`, `nvapi-`, `sk-ant-` and `AIza` prefixes are unambiguous — DeepSeek,
+Kimi and most compatible hosts also issue `sk-...` keys, so those need
+`--provider`. The provider and model are saved after the first run.
+
+These hosts name their models differently and rename them often, so semcache
+asks once rather than shipping a guess that would 400. Prices are not tracked
+for them unless you add them to `config.json`.
+
 ## Commands
 
 | | |
@@ -208,6 +239,7 @@ default. Any field can be set by any of them.
 | `--threshold` | `0.95` | cosine score needed to reuse an answer |
 | `--max-entries` | `5000` | capacity before LRU eviction |
 | `--embedder` | `auto` | `local` (ONNX) · `api` · `hash` (tests) |
+| `--base-url` | preset | endpoint for an OpenAI-compatible host |
 | `--scope` | `global` | `session` restricts reuse to one session |
 | `--ttl-seconds` | off | expire answers after this long |
 | `--project` | none | isolate this project's cache |
@@ -305,7 +337,9 @@ containers.
 
 ## Requirements
 
-Python 3.9+. Core install is `numpy`, `faiss-cpu`, `python-dotenv`. The local
+Python 3.9+. Core install is `numpy`, `faiss-cpu`, `python-dotenv`. Every
+OpenAI-compatible provider (Grok, DeepSeek, Kimi, GLM, NVIDIA, Groq, Ollama, …)
+needs only the `openai` extra, since they share one client. The local
 embedder uses `fastembed` (ONNX, ~50MB) rather than `sentence-transformers`,
 which would pull in ~2.5GB of PyTorch. Provider SDKs are optional extras,
 imported lazily, so installing one never drags in the others.

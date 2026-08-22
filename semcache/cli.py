@@ -23,9 +23,11 @@ from .metrics import Aggregate, Metrics, render_detail, render_plain
 from .providers import (
     CATALOG,
     ProviderError,
+    all_provider_names,
     build_provider,
     default_model,
     detect_provider,
+    needs_explicit_model,
 )
 
 KEY_ENV = {
@@ -142,7 +144,21 @@ def choose_model(cfg: Config, provider: str) -> str:
 
     options = CATALOG.get(provider, [])
     if not options:
-        return default_model(provider)
+        if not needs_explicit_model(provider):
+            return default_model(provider)
+        # These hosts each name their models differently and rename them often.
+        # Shipping a guess would 400; ask once and save it to config.json.
+        if not _interactive():
+            raise SystemExit(
+                f"{provider} needs a model name. Pass --model (e.g. "
+                "deepseek-chat, kimi-k2-0905-preview, glm-4.6)."
+            )
+        out("")
+        out(f"  Which {provider} model? (see their docs for current names)")
+        typed = input("  Model: ").strip()
+        if not typed:
+            raise SystemExit(f"{provider} needs a model name. Pass --model.")
+        return typed
     if not _interactive():
         return options[0].id  # nobody to ask; take the documented default
 
@@ -336,7 +352,14 @@ def cmd_chat(cfg: Config, args) -> int:
 def cmd_ask(cfg: Config, args) -> int:
     """One-shot: answer a single prompt and exit. Used by CI's smoke test."""
     key, provider = resolve_key(cfg, args.api_key)
-    model = cfg.model or (default_model(provider) if provider != "stub" else "stub-1")
+    if provider == "stub":
+        model = cfg.model or "stub-1"
+    elif cfg.model:
+        model = cfg.model
+    elif needs_explicit_model(provider):
+        raise SystemExit(f"{provider} needs a model name. Pass --model.")
+    else:
+        model = default_model(provider)
     session = build_session(cfg, key, provider, model)
     turn = session.ask(args.prompt)
     out(turn.text.strip())
@@ -394,7 +417,18 @@ def build_parser() -> argparse.ArgumentParser:
     # Tuning knobs live here so a normal user never needs one.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--api-key", help="provider key (else env, .env, or a prompt)")
-    common.add_argument("--provider", choices=list(CATALOG) + ["stub"])
+    common.add_argument(
+        "--provider",
+        choices=all_provider_names() + ["stub"],
+        help="anthropic/openai/gemini, or an OpenAI-compatible host "
+        "(deepseek, kimi, glm, nvidia, groq, openrouter, together, ollama, "
+        "lmstudio, custom)",
+    )
+    common.add_argument(
+        "--base-url",
+        dest="base_url",
+        help="endpoint for an OpenAI-compatible host; overrides the preset",
+    )
     common.add_argument("--model")
     common.add_argument("--embedder", choices=["auto", "local", "api", "hash"])
     common.add_argument("--threshold", type=float, help="cosine score needed to reuse (0.90)")

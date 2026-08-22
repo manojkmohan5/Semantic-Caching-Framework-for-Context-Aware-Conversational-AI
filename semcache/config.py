@@ -82,6 +82,8 @@ class Config:
     embedder: str = "auto"  # auto | local | api | hash
     provider: str | None = None
     model: str | None = None
+    #: Endpoint for OpenAI-compatible hosts. Overrides the built-in preset.
+    base_url: str | None = None
     #: A cache implies a stable answer for a stable question. Note this is only
     #: sent to models that still accept it -- current Anthropic models reject it.
     temperature: float = 0.0
