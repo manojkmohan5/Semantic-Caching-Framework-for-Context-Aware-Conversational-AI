@@ -12,14 +12,19 @@ license = { text = "MIT" }
 dependencies = [
     "numpy>=1.24",
     "faiss-cpu>=1.9.0",
-    "requests>=2.31",
     "python-dotenv>=1.0",
 ]
 
+# Everything below is optional and lazily imported, so the core install stays small
+# and you only pay for the provider you actually use.
 [project.optional-dependencies]
-# Local ONNX embedder. Deliberately optional and deliberately NOT
-# sentence-transformers: fastembed is ~50MB of onnxruntime instead of ~2.5GB of torch.
+# Local ONNX embedder. Deliberately NOT sentence-transformers: fastembed is ~50MB
+# of onnxruntime instead of ~2.5GB of torch.
 local = ["fastembed>=0.4"]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]
+gemini = ["google-genai>=1.0"]
+all = ["fastembed>=0.4", "anthropic>=0.40", "openai>=1.40", "google-genai>=1.0"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]

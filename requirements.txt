@@ -1,5 +1,7 @@
-# Core runtime. For the local ONNX embedder use: pip install -e ".[local]"
+# Core runtime only. Providers and the local embedder are optional extras:
+#   pip install -e ".[all]"        everything
+#   pip install -e ".[anthropic]"  just the Claude path
+#   pip install -e ".[local]"      just the offline ONNX embedder
 numpy>=1.24
 faiss-cpu>=1.9.0
-requests>=2.31
 python-dotenv>=1.0
