@@ -2,56 +2,66 @@
 
 A semantic caching layer that sits in front of any LLM. Ask a question once; ask
 it again in different words and the answer comes back from local disk in
-milliseconds, with no API call, no tokens billed, and no rate limit.
+milliseconds — no API call, no tokens billed, no rate limit.
 
 ```
-you > Why is our checkout API returning 504 on large carts?
+you > What causes memory fragmentation in long-running Python processes?
 
-  asked the model · 2.4s · 52 in / 890 out · $0.0055
-  A 504 on large carts usually points to a request exceeding an upstream
-  timeout rather than a hard failure. Check three things in order...
+  asked the model · 15.8s · 21 in / 2,518 out
+  Memory fragmentation in long-running Python processes comes from...
 
-you > checkout endpoint gives 504 errors on big carts, why?
+you > What causes memory fragmentation in long running Python processes?
 
-  from cache · 27ms · 52 in / 890 out · saved $0.0055 · 96% match
-  A 504 on large carts usually points to a request exceeding an upstream
-  timeout rather than a hard failure. Check three things in order...
+  from cache · 28ms · 21 in / 2,518 out · 100% match
+  Memory fragmentation in long-running Python processes comes from...
 ```
 
-Different words, no shared phrasing, no question mark — reused anyway. That is
-the whole product.
+Measured on a real session: **cache hits 0.3–90ms, model calls 5–13s.** Two
+orders of magnitude, and the hits cost nothing.
 
 ---
 
-## Install
+## Contents
 
-Pick one. All three give you the same `semcache` command.
+- [Quickstart](#quickstart) · [How it works](#how-it-works) · [Providers](#providers)
+- [Commands](#commands) · [Reading the output](#reading-the-output) · [Configuration](#configuration)
+- [Use it in your own code](#use-it-in-your-own-code) · [Docker](#docker)
+- [Tuning the threshold](#tuning-the-threshold) ← read before changing it
+- [Limitations](#limitations) · [Troubleshooting](#troubleshooting) · [Development](#development)
+
+---
+
+## Quickstart
+
+Requires Python 3.9+.
 
 ```bash
-# 1. from source, with the offline embedder and every provider
+git clone https://github.com/manojkmohan5/Semantic-Caching-Framework-for-Context-Aware-Conversational-AI.git
+cd Semantic-Caching-Framework-for-Context-Aware-Conversational-AI
 pip install -e ".[all]"
-
-# 2. minimal: core + just the provider you use
-pip install -e ".[local,anthropic]"     # or [openai] / [gemini]
-
-# 3. Docker, nothing installed on the host
-docker build -t semcache .
-docker run -it -v semcache-data:/data -e ANTHROPIC_API_KEY=sk-ant-... semcache
 ```
 
-Then run it:
+Check it works without spending anything or needing a key:
 
 ```bash
-semcache                 # the REPL
-python -m semcache       # identical, no install needed
+semcache bench --offline --embedder local --assert-targets
 ```
 
-## First run
+That replays 48 questions cold then warm and asserts its latency targets. All
+`ok` means you are good.
+
+Then start it:
+
+```bash
+semcache
+```
+
+First run asks three things, once:
 
 ```
-$ semcache
-
-Paste your LLM API key (hidden): ****************************
+semcache 0.1.0  -  no API key found
+  (the paste stays hidden, so nothing appears as you type)
+Paste your LLM API key (hidden):
   This looks like an anthropic key. Use it? [Y/n] y
 
   Pick a model:
@@ -59,91 +69,142 @@ Paste your LLM API key (hidden): ****************************
     2) claude-opus-5        $5.00/$25.00 per Mtok      most capable
     3) claude-haiku-4-5     $1.00/$5.00 per Mtok       cheapest, lowest latency
   Model [1-3, Enter for 1]: 1
-  Save the key to /home/you/.semcache/.env? [Y/n] y
+  Save the key to ~/.semcache/.env? [Y/n] y
   Saved. You won't be asked again.
 
 Ready. 0 answers cached.
 Type your question. /help for commands, /exit to quit.
 ```
 
-Paste a key, confirm the provider, pick a model. Every later start is two lines.
-The key is read from `--api-key`, then `SEMCACHE_API_KEY`, then
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`, then `.env` — so in
-CI or Docker you never see a prompt at all.
+Every later run goes straight to `Ready.` Type questions; `/stats` shows what you
+have saved; `/exit` quits.
+
+**Install only what you need** — provider SDKs and the local embedder are optional
+extras, lazily imported:
+
+```bash
+pip install -e ".[local,anthropic]"    # offline embedder + Claude
+pip install -e ".[openai]"             # OpenAI and every compatible host
+pip install -e ".[all]"                # everything
+```
+
+---
+
+## How it works
+
+```
+prompt
+ → normalize (trim, collapse whitespace, casefold) → sha256
+ → tier 1  exact hash lookup in SQLite     → ~0.3ms, no embedding at all
+ → embed   local ONNX ~30ms | provider API ~150ms
+ → tier 2  FAISS top-k, score >= threshold → ~0.5ms
+ → tier 3  call the model, then store it
+ → record a metric for every outcome, errors included
+```
+
+- **Vectors are L2-normalized on write**, so FAISS inner product *is* cosine
+  similarity. There is no cosine function anywhere in the codebase.
+- **The index is `IndexIDMap2(IndexFlatIP)`**, not a bare flat index — a bare one
+  has no `remove_ids`, so LRU eviction could never shrink it while SQLite shrank
+  beside it.
+- **LRU, not FIFO.** Every hit bumps a monotonic counter, so an old answer that
+  keeps getting reused survives while a recent one nobody wants is dropped. The
+  counter is deliberately not a wall clock: `time.time()` has ~15.6ms resolution
+  on Windows, so timestamps tie, and ties made eviction pick the wrong entry.
+- **SQLite is the source of truth.** Vectors live there as well as in FAISS, so a
+  deleted or corrupt index is a rebuild, not data loss. Delete
+  `~/.semcache/index/*.faiss` and the next start rebuilds it.
+- **Context is used sparingly.** The bare prompt is embedded by default; recent
+  turns are folded in only when the prompt cannot stand alone (anaphora, or under
+  five words). Embedding `context + prompt` unconditionally destroys
+  cross-session reuse, and that reuse is where the savings are.
+- **Failure does not dead-end.** On a rate limit, timeout or outage, the closest
+  answer above a lower bar is served, clearly labelled, and counted separately —
+  never folded into the hit rate.
+- **Bad answers are never cached.** Empty, oversized and length-truncated
+  responses are rejected, because one cached truncated answer is served forever.
+
+---
 
 ## Providers
 
-Three native SDK paths, plus every OpenAI-compatible host through one client:
+Three native SDK paths, plus every OpenAI-compatible host through one client.
 
 | | how |
 |---|---|
-| Anthropic, OpenAI, Google Gemini | detected from the key, native SDK |
-| **Grok** (xAI) | `--provider grok` — detected from `xai-...` keys |
+| Anthropic, OpenAI, Gemini | detected from the key, native SDK |
+| **Grok** (xAI) | detected from `xai-...` keys |
+| **OpenRouter** | detected from `sk-or-...`; `--model anthropic/claude-sonnet-4.5` |
+| **NVIDIA NIM** | detected from `nvapi-...` keys |
 | **DeepSeek** | `--provider deepseek --model deepseek-chat` |
 | **Kimi** (Moonshot) | `--provider kimi --model kimi-k2-0905-preview` |
 | **GLM** (Zhipu) | `--provider glm --model glm-4.6` |
-| **NVIDIA NIM** | `--provider nvidia` — detected from `nvapi-...` keys |
-| **OpenRouter** | detected from `sk-or-...` keys; `--model anthropic/claude-sonnet-4.5` |
 | Groq, Together | `--provider groq` / `together` |
-| Ollama, LM Studio (local) | `--provider ollama` / `lmstudio` |
+| **Ollama, LM Studio** (local) | `--provider ollama --model llama3.1` |
 | anything else | `--provider custom --base-url https://your-host/v1` |
 
 ```bash
 semcache --provider grok --model grok-4
-semcache --provider deepseek --model deepseek-chat
-semcache --provider ollama --model llama3.1 --embedder local   # fully offline
+semcache --provider ollama --model llama3.1        # fully offline, no key
 ```
 
 `--base-url` overrides any preset, so a corporate gateway or proxy works too.
-Only `xai-`, `nvapi-`, `sk-or-`, `sk-ant-` and `AIza` prefixes are unambiguous — DeepSeek,
-Kimi and most compatible hosts also issue `sk-...` keys, so those need
-`--provider`. The provider and model are saved after the first run.
 
-These hosts name their models differently and rename them often, so semcache
-asks once rather than shipping a guess that would 400. Prices are not tracked
-for them unless you add them to `config.json`.
+Only `sk-ant-`, `sk-or-`, `xai-`, `nvapi-` and `AIza` prefixes are unambiguous.
+DeepSeek, Kimi and most compatible hosts also issue `sk-...` keys, so those need
+`--provider`. Provider and model are saved after the first run.
+
+These hosts rename models often, so semcache asks once rather than shipping a
+guess that would 404.
+
+---
 
 ## Commands
 
 | | |
 |---|---|
-| `semcache` | the REPL |
+| `semcache` | the chat loop (default) |
 | `semcache ask "question"` | answer one question and exit |
 | `semcache stats [--since 7d] [--detail]` | what the cache has saved you |
 | `semcache bench [--offline]` | replay a query set, cold vs warm |
 | `semcache clear` | forget every saved answer |
 
-In the REPL: `/stats`, `/clear`, `/help`, `/exit`. That is the whole surface.
+In the chat loop: `/stats`, `/clear`, `/help`, `/exit`.
 
-## What you get back
+---
+
+## Reading the output
 
 Every answer carries the same four facts: where it came from, how long it took,
 tokens in/out, and what it cost or saved.
 
 ```
   asked the model · 2.4s · 52 in / 890 out · $0.0055
-  from cache · 0.2ms · 52 in / 890 out · saved $0.0055
-  from cache · 27ms · 52 in / 890 out · saved $0.0055 · 96% match
-  asked the model · 1.9s · 44 in / 620 out · $0.0039 · closest saved answer was only 81% match
-  from cache · 31ms · 84% match · the model is rate-limited, so this is the closest saved answer
+  from cache · 0.3ms · 52 in / 890 out · saved $0.0055
+  from cache · 28ms · 52 in / 890 out · saved $0.0055 · 100% match
+  asked the model · 1.9s · 44 in / 620 out · closest saved answer was only 81.8% match
+  from cache · 31ms · 84.2% match · the model is rate-limited, so this is the closest saved answer
 ```
 
-Cached answers report the original answer's token counts, because that is
-exactly what you did not pay for. The fourth line is the important one: when
-nothing is close enough, it says how close it got, which is how you tune the
-threshold.
+Cached answers report the original answer's token counts, because that is exactly
+what you did not pay for.
 
-`/stats` is plain English, no percentiles:
+**The fourth line is the one to watch.** `closest saved answer was only 81.8%
+match` means the cache *was* consulted, found its nearest neighbour, and correctly
+refused it. It is also how you tune — see
+[Tuning the threshold](#tuning-the-threshold).
+
+`/stats` in plain English:
 
 ```
-Questions asked          312
-  answered from cache    218    (70%)
-  asked the model         94
+Questions asked          13
+  answered from cache    4     (31%)
+  asked the model        9
 
 Speed
-  from cache             27 ms typical    (fastest 0.2 ms, slowest 41 ms)
-  from the model         2.2 s typical    (fastest 1.1 s, slowest 5.3 s)
-  cache answers came back about 81x faster
+  from cache             34 ms typical    (fastest 0.3 ms, slowest 90 ms)
+  from the model         5.8 s typical    (fastest 4.9 s, slowest 13.4 s)
+  cache answers came back about 171x faster
 
 Tokens
   sent to the model      6,180 in / 71,400 out
@@ -153,205 +214,228 @@ Money
   spent                  $1.14
   saved by the cache     $2.64   (70% of what this would have cost)
 
-Model calls
-  91 of 94 succeeded - 3 rate_limit
-
 Cache
-  94 saved answers, 3.1 MB   (room for 5,000)
-  reused most:  "Why is our checkout API returning 504..."   19 times
+  9 saved answers, 28 KB   (room for 5,000)
+  reused most:  "What is the fastest car?"   3 times
 ```
 
-Percentiles still exist — `semcache stats --detail` and `bench` print them,
-labelled in words ("slowest 1 in 20"). They are kept out of the chat flow.
+Percentiles are deliberately kept out of the chat flow. `semcache stats --detail`
+and `bench` print them, labelled in words ("slowest 1 in 20").
 
-## How it works
+Every request is also appended to `~/.semcache/metrics.jsonl`, one JSON object
+per line, so you can re-slice a session later.
 
-```
-prompt
- → normalize (trim, collapse whitespace, casefold) → sha256
- → tier 1  exact hash lookup in SQLite        → ~0.2ms, no embedding at all
- → embed   local ONNX ~25ms | provider API ~150ms
- → tier 2  FAISS top-k, score >= threshold    → ~1ms
- → tier 3  call the model, then store it
- → record a metric for every outcome, errors included
-```
+---
 
-- **Vectors are L2-normalized on write**, so FAISS inner product *is* cosine
-  similarity. There is no cosine function anywhere in the codebase.
-- **The index is `IndexIDMap2(IndexFlatIP)`**, not a bare flat index, because a
-  bare one has no `remove_ids` — and without removal, LRU eviction could never
-  shrink the index while SQLite shrank beside it.
-- **LRU, not FIFO.** Every hit bumps `last_used_at`, so an old answer that keeps
-  getting reused survives and a recent one nobody wants gets dropped.
-- **SQLite is the source of truth.** Vectors are stored there as well as in
-  FAISS, so a deleted or corrupt index file is a rebuild, not data loss. Delete
-  `~/.semcache/index/*.faiss` and the next start rebuilds it.
-- **Context is used sparingly.** The bare prompt is embedded by default, and
-  conversation context is folded in only when the prompt cannot stand alone
-  (anaphora, or under five words). Embedding `context + prompt` unconditionally
-  destroys cross-session reuse, and reuse across sessions is where the savings
-  are.
-- **Failure does not dead-end.** On a rate limit, timeout or outage, the closest
-  answer above a lower bar is served, clearly labelled, and counted separately —
-  never folded into the hit rate.
-- **Bad answers are never cached.** Empty, oversized, or length-truncated
-  responses are rejected, because one cached truncated answer is served forever.
+## Configuration
 
-## Multiple projects, multiple people
+CLI flag → `SEMCACHE_*` env var → `~/.semcache/config.json` → default. Any field
+can be set by any of them.
 
-The cache is shared by default — that is where the savings are largest. Opt into
-isolation when answers should not cross a boundary:
+| | default | |
+|---|---|---|
+| `--threshold` | `0.95` | cosine score needed to reuse an answer |
+| `--max-entries` | `5000` | capacity before LRU eviction |
+| `--embedder` | `auto` | `local` (ONNX) · `api` · `hash` (tests only) |
+| `--scope` | `global` | `session` restricts reuse to one session |
+| `--ttl-seconds` | off | expire answers after this long |
+| `--project` | none | isolate this project's cache from others |
+| `--base-url` | preset | endpoint for an OpenAI-compatible host |
+| `--effort` | server default | Anthropic reasoning effort; `low` cuts miss latency |
+| `--offline` | off | built-in stub model: no key, no network, no cost |
+| `--no-log-prompts` | off | record hashes only, never prompt text |
+
+**Multiple projects.** The cache is shared by default, because that is where the
+savings are largest. Opt into isolation when answers should not cross a boundary:
 
 ```bash
 semcache --project api-service        # ~/.semcache/projects/api-service/
 SEMCACHE_PROJECT=data-pipeline semcache
 ```
 
-Each project gets its own database, index and metrics. Switching the embedder or
-its dimension also opens a fresh namespace automatically, because vectors from
-different embedders are not comparable and mixing them returns nonsense.
+Each project gets its own database, index and metrics; the ONNX model is shared.
+Switching embedder or dimension also opens a fresh namespace automatically,
+because vectors from different embedders are not comparable.
 
-## In your own code
+**Where things live** — under `~/.semcache/`: `cache.db` (answers + vectors),
+`index/*.faiss`, `metrics.jsonl`, `models/` (ONNX model), `.env` (your key,
+`0600` on POSIX), `config.json`.
+
+---
+
+## Use it in your own code
 
 ```python
 from semcache import SemCache
 
 with SemCache(project="my-service") as cache:
     answer = cache.ask("What causes memory fragmentation in Python?")
-    print(answer.text, answer.source, answer.latency_ms)  # 'miss'  2410.5
+    print(answer.text)
+    print(answer.source, answer.latency_ms)  # 'miss'  2410.5
 
-    again = cache.ask("Why do Python services fragment the heap?")
-    print(again.source, again.similarity)  # 'semantic'  0.96
+    again = cache.ask("What causes memory fragmentation in Python")
+    print(again.source, again.similarity)  # 'semantic'  0.99
 
     print(cache.report())
 ```
 
-A runnable version of the above is in
-[examples/use_the_api.py](examples/use_the_api.py):
+`answer` carries `.text`, `.source` (`exact`/`semantic`/`degraded`/`miss`/`error`),
+`.similarity`, `.latency_ms`, `.input_tokens`, `.output_tokens`, `.cost_usd`,
+`.cost_saved_usd`, `.from_cache`. Pass `on_chunk=print` to stream.
+
+With no arguments, `SemCache()` reads the key from the environment and infers the
+provider from its shape. Construct one per worker — it is not thread-safe.
+
+Runnable version: [examples/use_the_api.py](examples/use_the_api.py)
 
 ```bash
 python examples/use_the_api.py --offline        # no key, no cost
-python examples/use_the_api.py --key sk-or-v1-... --provider openrouter     --model "liquid/lfm-2.5-2.6b:free"
+python examples/use_the_api.py --key sk-... --provider openrouter --model "z-ai/glm-5.2:free"
 ```
 
-`ask()` takes an `on_chunk` callback for streaming. With no arguments `SemCache()`
-reads the key from the environment and infers the provider from its shape.
-Construct one per worker; it is not thread-safe.
+---
 
-## Configuration
+## Docker
 
-Resolution order: CLI flag → `SEMCACHE_*` env var → `~/.semcache/config.json` →
-default. Any field can be set by any of them.
+```bash
+docker build -t semcache .
+docker run -it -v semcache-data:/data -e ANTHROPIC_API_KEY=sk-ant-... semcache
+```
 
-| | default | |
+The `/data` volume is what makes the cache worth having — answers survive
+container restarts. The ONNX model is baked into the image at build time and lives
+*outside* `/data`, so a fresh volume never triggers a re-download. Verified in CI:
+the image passes the full benchmark with `--network none`.
+
+`docker compose run --rm semcache` also works; the compose file forwards
+`SEMCACHE_API_KEY`, `SEMCACHE_PROVIDER`, `SEMCACHE_MODEL`, `SEMCACHE_BASE_URL` and
+`SEMCACHE_PROJECT`.
+
+---
+
+## Tuning the threshold
+
+**Do not lower it without running `bench`.** This is the one setting that can make
+semcache serve a confidently wrong answer.
+
+Every group in the bundled query set carries a *trap*: a similar-sounding question
+with a genuinely different answer ("returning 504" vs "returning 401", "add an
+index" vs "drop an index"). Measured with `bge-small-en-v1.5`:
+
+| threshold | paraphrases reused | traps wrongly served |
 |---|---|---|
-| `--threshold` | `0.95` | cosine score needed to reuse an answer |
-| `--max-entries` | `5000` | capacity before LRU eviction |
-| `--embedder` | `auto` | `local` (ONNX) · `api` · `hash` (tests) |
-| `--base-url` | preset | endpoint for an OpenAI-compatible host |
-| `--scope` | `global` | `session` restricts reuse to one session |
-| `--ttl-seconds` | off | expire answers after this long |
-| `--project` | none | isolate this project's cache |
-| `--effort` | server default | Anthropic reasoning effort; `low` cuts miss latency |
-| `--offline` | off | built-in stub model: no key, no network, no cost |
-| `--no-log-prompts` | off | record hashes only, never prompt text |
+| 0.88 | most | **12 of 12** |
+| 0.90 | 60% | **10** |
+| 0.92 | 54% | **4** |
+| 0.93 | 52% | **2** |
+| **0.94** | 50% | **0** ← measured floor |
+| **0.95** (default) | 50% | **0** |
 
-Prices for cost reporting live in `config.json` under `prices`. Anthropic rates
-ship built in; OpenAI and Google are deliberately left unset rather than
-guessed, so `/stats` says "not tracked" instead of showing an invented number.
+Below 0.94, "why is checkout returning 504" starts being answered with the 401
+answer. The default is 0.95 because a confidently wrong answer is worse than an
+extra API call.
 
-## Benchmark
+If you want more reuse, **phrase questions more consistently** rather than
+lowering the bar. Reproduce the table yourself:
 
-```
-$ semcache bench --offline --embedder local --assert-targets
-
-replaying queries.jsonl · 12 groups · 48 prompts · stub · local:BAAI/bge-small-en-v1.5
-
-                              cold      warm
-  requests                      48        48
-  answered from cache            0        48
-  hit rate                    0.0%    100.0%
-  model calls                   48         0
-  average                    244.8 ms      17.7 ms
-  average change                      -92.8%
-
-targets
-  ok   no false hits on trap questions  0.00 (target == 0)
-  ok   exact hit typical                0.18 ms (target <= 1.0 ms)
-  ok   cache hit typical (local)        13.67 ms (target <= 60.0 ms)
-  ok   warm start                       16.83 ms (target <= 400.0 ms)
+```bash
+semcache bench --offline --embedder local --threshold 0.90
 ```
 
-`--offline` uses a stub model, so this runs in CI with no key and no spend.
-Latency targets are per-backend and measured, not aspirational: a semantic hit is
-dominated by embedding the query, which costs ~25ms with bge-small and ~150ms
-over an API.
+---
 
-The **trap questions** are the important row. Each group carries a
-similar-sounding question with a genuinely different answer ("returning 504" vs
-"returning 401", "add an index" vs "drop an index"). Serving a cached answer to
-one of those is the failure mode that matters, and it fails the build.
+## Limitations
 
-## Known limitation: reversed relations
-
-Threshold 0.95 was chosen by measurement, not taste. On the bundled query set
-with `bge-small-en-v1.5`:
-
-| threshold | real paraphrases kept | trap questions admitted |
-|---|---|---|
-| 0.90 | 23 / 24 | 6 / 12 |
-| **0.95** | **23 / 24** | **1 / 12** |
-| 0.98 | 18 / 24 | 1 / 12 |
-
-The one trap that survives every threshold:
+**Reversed relations are the known blind spot.** These two score **0.989** — higher
+than six genuine paraphrases:
 
 > "Why is my Postgres query **doing a sequential scan instead of using the index**?"
 > "Why is my Postgres query **using the index instead of a sequential scan**?"
 
-These score **0.989** — higher than six genuine paraphrases. Same words,
-reversed relation. Embeddings discard word order by design, so no threshold
-separates them, and raising the threshold high enough to try would throw away
-real paraphrases. It is tracked in the query set as a `hard_trap`, reported on
-every benchmark run so a regression stays visible, and excluded from the gate
-because gating on something unachievable would just mean a permanently red
-build. If your domain is full of such inversions, raise `--threshold` and expect
-a lower hit rate.
+Same words, reversed relation. Embeddings discard word order by design, so no
+threshold separates them, and raising it high enough to try would throw away real
+paraphrases. It is tracked in the query set as a `hard_trap`, reported on every
+benchmark run so a regression stays visible, and excluded from the pass/fail gate
+because gating on something unachievable only means a permanently red build.
 
 Other deliberate ceilings, each marked in the source:
 
-- One lock around cache mutations — right for a single-user REPL, shard per
+- One lock around cache mutations — right for a single-user REPL; shard per
   namespace for concurrent traffic.
 - `IndexFlatIP` is an exact brute-force scan and `remove_ids` compacts in O(n) —
   correct and fast to ~100k entries, then switch to `IndexIVFFlat`.
 - Anaphora detection is a keyword heuristic, not coreference resolution. See
   [bonus.md](bonus.md) Part A.
-- The `hash` embedder is bag-of-words. It exists so tests and CI can exercise
-  cache mechanics with no key, no network and no model download; it has no
-  semantic understanding and is not for real use.
+- The `hash` embedder is bag-of-words. It exists so tests and CI can exercise cache
+  mechanics with no key, no network and no model download; it has no semantic
+  understanding and is not for real use.
+- Cost is reported only for models with a known price. Anthropic rates ship built
+  in; OpenAI, Gemini and the compatible hosts are left unset rather than guessed,
+  so `/stats` says "not tracked" instead of showing an invented number.
+- Misses get more expensive deeper into a conversation, because chat history is
+  sent with each call. Cache hits therefore save more than the raw output token
+  counts suggest.
+
+---
+
+## Troubleshooting
+
+**`402 Insufficient credits`** — the selected model is paid and the account has no
+balance. Pick a free or cheaper one: `semcache --model "z-ai/glm-5.2:free"`.
+
+**`the provider does not have a model called ...`** — model ids are hand-typed for
+OpenAI-compatible hosts and get renamed often. Check the provider's model list and
+pass `--model`.
+
+**Nothing appears while pasting the key** — that is `getpass`; the paste is hidden
+by design.
+
+**Everything is a miss** — expected until you repeat or paraphrase something. The
+`closest saved answer was only X% match` line proves the cache is being consulted.
+Ask the same question twice to see a hit.
+
+**Paraphrases are not hitting** — check the reported match percentage. Scores vary
+a lot by wording: two phrasings of one idea measured 0.90 and 0.837 in the same
+session. Read [Tuning the threshold](#tuning-the-threshold) before lowering it.
+
+**`cache was written by a newer semcache`** — the cache is from a later version.
+Upgrade, or point `--home` elsewhere. Older caches migrate automatically.
+
+**Wipe everything and start over** — `rm -rf ~/.semcache` (Windows:
+`Remove-Item -Recurse -Force "$env:USERPROFILE\.semcache"`).
+
+---
 
 ## Development
 
 ```bash
 pip install -e ".[all,dev]"
-pytest                                              # no key, no network needed
+pytest                    # no key, no network, no model download
 ruff check . && ruff format --check .
 semcache bench --offline --embedder hash --assert-targets
 docker run --rm --network none semcache bench --offline --embedder local --assert-targets
 ```
 
-CI runs lint, the test suite on Linux and Windows across Python 3.9/3.11/3.12, an
+CI runs lint, the test suite on Linux and Windows across Python 3.9 and 3.12, an
 offline smoke test, the real-embedder benchmark, and a Docker build that verifies
-the image works with `--network none` and that the cache survives across separate
+the image works with no network and that the cache survives across separate
 containers.
 
-## Requirements
+Layout:
 
-Python 3.9+. Core install is `numpy`, `faiss-cpu`, `python-dotenv`. Every
-OpenAI-compatible provider (Grok, DeepSeek, Kimi, GLM, NVIDIA, Groq, Ollama, …)
-needs only the `openai` extra, since they share one client. The local
-embedder uses `fastembed` (ONNX, ~50MB) rather than `sentence-transformers`,
-which would pull in ~2.5GB of PyTorch. Provider SDKs are optional extras,
-imported lazily, so installing one never drags in the others.
+```
+semcache/
+  cli.py         REPL, first-run setup, subcommands
+  chat.py        the three-tier request pipeline
+  cache.py       lookup, LRU eviction, TTL, drift repair
+  index.py       FAISS IndexIDMap2(IndexFlatIP), atomic saves
+  store.py       SQLite metadata, exact tier, migrations
+  embedders.py   local ONNX | provider API | deterministic hash
+  providers.py   Anthropic | OpenAI | Gemini | 11 compatible hosts | stub
+  metrics.py     per-request records, one aggregator, two renderers
+  config.py      CLI > env > file > default resolution
+  bench.py       cold/warm replay with asserted targets
+```
 
 ## Licence
 

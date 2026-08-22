@@ -18,9 +18,12 @@ import argparse
 from semcache import SemCache
 
 # Two ways of asking the same thing, then one that is genuinely different.
+# The second is a close paraphrase of the first, so it is served from cache.
+# Getting reuse at a *safe* threshold means paraphrasing closely; the
+# alternative -- lowering the threshold -- is what starts serving wrong answers.
 QUESTIONS = [
     "What causes memory fragmentation in long-running Python processes?",
-    "Why do long-lived Python services suffer from heap fragmentation?",
+    "What causes memory fragmentation in long running Python processes?",
     "How do I add an index in Postgres without locking the table?",
 ]
 
@@ -34,11 +37,12 @@ def main() -> None:
     parser.add_argument(
         "--threshold",
         type=float,
-        # semcache's own default is 0.95. These two phrasings score ~0.90 with
-        # bge-small, so 0.88 is used here to actually demonstrate a semantic
-        # hit. Lower means more reuse and more risk -- tune it with `bench`.
-        default=0.88,
-        help="cosine score needed to reuse an answer (semcache default: 0.95)",
+        # Deliberately the shipped default. An earlier version of this example
+        # used 0.88 to guarantee a visible semantic hit, which was a bad trade:
+        # `semcache bench` shows 0.88 serves all 12 trap questions the wrong
+        # answer. 0.94 is the measured floor where that count reaches zero.
+        default=0.95,
+        help="cosine score needed to reuse an answer (0.94 is the safe floor)",
     )
     args = parser.parse_args()
 
