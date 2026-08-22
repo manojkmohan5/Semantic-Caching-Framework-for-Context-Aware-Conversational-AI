@@ -91,6 +91,10 @@ class LocalEmbedder(Embedder):
             # Windows without Developer Mode cannot create the symlinks the HF
             # cache prefers; it falls back correctly but logs a scary
             # WinError 1314 first. Silence the noise before importing.
+            # Windows without Developer Mode cannot create symlinks, and the
+            # hub logs an ERROR-level WinError 1314 before falling back. Telling
+            # it to copy instead avoids the failed attempt altogether.
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
             os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             try:

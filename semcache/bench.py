@@ -100,6 +100,9 @@ def run_bench(cfg, args) -> int:
             embedder=embedder_name,
             threshold=threshold,
             offline=True if cfg.offline else cfg.offline,
+            # The cache is throwaway, the model is not. Without pinning this to
+            # the real home, every bench run re-downloaded ~130MB into tmp.
+            model_cache_dir=cfg.model_cache_dir or str(cfg.models_dir),
         )
         provider = build_provider(
             "stub" if bench_cfg.offline else (cfg.provider or "stub"),
