@@ -146,7 +146,9 @@ class Config:
     @classmethod
     def load(cls, **overrides) -> Config:
         """Defaults, then config.json, then SEMCACHE_* env vars, then CLI overrides."""
-        home = Path(os.environ.get(f"{ENV_PREFIX}HOME") or overrides.get("home") or cls.home)
+        # Explicit argument first: the documented order is CLI > env > file >
+        # default, and reading the env var first inverted it for `home` alone.
+        home = Path(overrides.get("home") or os.environ.get(f"{ENV_PREFIX}HOME") or cls.home)
         cfg = cls(home=Path(home).expanduser())
 
         cfg = _overlay(cfg, _from_file(cfg.config_path))

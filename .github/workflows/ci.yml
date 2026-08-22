@@ -13,8 +13,12 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  # Never let CI touch a real provider, even if a secret leaks into the env.
-  SEMCACHE_OFFLINE: "1"
+  HF_HUB_DISABLE_PROGRESS_BARS: "1"
+  # SEMCACHE_OFFLINE is deliberately NOT set workflow-wide. It used to be, and it
+  # silently forced every test onto the stub provider -- green locally, red here.
+  # The CLI-driven jobs pass --offline on the command line instead, and the test
+  # suite clears all SEMCACHE_* vars in conftest.py so the environment can never
+  # steer it.
 
 jobs:
   lint:
@@ -37,8 +41,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 3.9 and 3.12 are the ends of the supported range, which is where
+        # breakage lives. A middle version added two jobs without covering a
+        # boundary, so the matrix is 4 jobs rather than 6.
         os: [ubuntu-latest, windows-latest]
-        python: ["3.9", "3.11", "3.12"]
+        python: ["3.9", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,8 +53,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - name: Install (core + dev only, no ONNX model)
-        run: pip install -e ".[dev]"
+      - name: Install (core + openai + dev; still no ONNX model)
+        # openai is required by test_openai_compatible.py, which drives the real
+        # client against a local mock endpoint. No key, no network, no model.
+        run: pip install -e ".[openai,dev]"
       - name: Tests
         # The hash embedder keeps this offline and deterministic: no API key,
         # no 133MB model download, no network.
