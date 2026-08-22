@@ -357,15 +357,6 @@ def test_stub_provider_streams_and_reports_usage():
     assert not p.result.truncated
 
 
-def test_schema_version_mismatch_is_a_clear_error(tmp_path):
-    store = Store(tmp_path / "c.db", "ns")
-    store.db.execute("UPDATE meta SET value='999' WHERE key='schema_version'")
-    store.db.commit()
-    store.close()
-    with pytest.raises(RuntimeError, match="schema"):
-        Store(tmp_path / "c.db", "ns")
-
-
 # ------------------------------------------------------- concurrency regression
 
 
@@ -507,3 +498,83 @@ def test_repl_exits_cleanly(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Saved." in output
     assert "Traceback" not in output
+
+
+V1_SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL,
+    prompt_hash TEXT NOT NULL, prompt TEXT NOT NULL, response TEXT NOT NULL,
+    vector BLOB NOT NULL, session_id TEXT, provider TEXT, model TEXT, embedder TEXT,
+    created_at REAL NOT NULL, last_used_at REAL NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 0, prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    response_tokens INTEGER NOT NULL DEFAULT 0);
+INSERT INTO meta VALUES ('schema_version','1');
+"""
+
+
+def _build_v1_cache(path, stamps=(100.0, 300.0, 200.0)):
+    import sqlite3
+
+    con = sqlite3.connect(str(path))
+    con.executescript(V1_SCHEMA)
+    blob = np.ones(256, dtype="float32").tobytes()
+    for i, when in enumerate(stamps):
+        con.execute(
+            "INSERT INTO entries (namespace, prompt_hash, prompt, response, vector,"
+            " session_id, provider, model, embedder, created_at, last_used_at,"
+            " hit_count, prompt_tokens, response_tokens)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ns",
+                prompt_hash(f"old q{i}"),
+                f"old q{i}",
+                f"old a{i}",
+                blob,
+                "s",
+                "stub",
+                "m",
+                "hash:v1",
+                when,
+                when,
+                0,
+                1,
+                1,
+            ),
+        )
+    con.commit()
+    con.close()
+
+
+def test_a_v1_cache_migrates_instead_of_being_refused(tmp_path):
+    """Refusing to open an older cache threw away answers already paid for, and
+    pointed at `semcache clear`, which had to open the same database to work --
+    so the suggested fix could not work either."""
+    db = tmp_path / "cache.db"
+    _build_v1_cache(db)
+
+    store = Store(db, "ns")
+    version = store.db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
+    assert int(version) == 2
+    assert store.count() == 3, "no answer may be lost"
+    assert store.by_hash("old q1").response == "old a1"
+
+    # use_seq must be backfilled in last_used_at order (q0=100, q2=200, q1=300).
+    order = [row[0] for row in store.db.execute("SELECT prompt FROM entries ORDER BY use_seq")]
+    assert order == ["old q0", "old q2", "old q1"]
+    store.close()
+
+    reopened = Store(db, "ns")  # migrating twice must be a no-op
+    assert reopened.count() == 3
+    reopened.close()
+
+
+def test_a_newer_cache_is_refused_with_a_clear_message(tmp_path):
+    db = tmp_path / "cache.db"
+    _build_v1_cache(db)
+    store = Store(db, "ns")
+    store.db.execute("UPDATE meta SET value='99' WHERE key='schema_version'")
+    store.db.commit()
+    store.close()
+    with pytest.raises(RuntimeError, match="newer semcache"):
+        Store(db, "ns")

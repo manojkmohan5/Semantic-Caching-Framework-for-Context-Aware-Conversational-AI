@@ -20,11 +20,16 @@ from .config import SCHEMA_VERSION
 
 _WS = re.compile(r"\s+")
 
-SCHEMA = """
+META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+"""
+
+# Created after the version check, because the indexes below reference columns a
+# migration may still need to add to an older table.
+ENTRIES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     namespace       TEXT    NOT NULL,
@@ -98,11 +103,22 @@ class Store:
         # WAL gives crash-atomic commits and lets readers run during writes.
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
-        self.db.executescript(SCHEMA)
+        # Order matters: meta first so the version is readable, then any
+        # migration, and only then the entries table and its indexes -- the LRU
+        # index references a column that a v1 cache does not have yet.
+        self.db.executescript(META_SCHEMA)
         self._check_schema()
+        self.db.executescript(ENTRIES_SCHEMA)
         self.db.commit()
 
     def _check_schema(self) -> None:
+        """Record the version, or migrate an older cache in place.
+
+        Refusing to open an old cache and telling the user to wipe it was the
+        wrong trade twice over: it threw away answers they had already paid for,
+        and `semcache clear` had to open the same database to do it, so the
+        suggested fix could not work either.
+        """
         cur = self.db.execute("SELECT value FROM meta WHERE key='schema_version'")
         row = cur.fetchone()
         if row is None:
@@ -110,11 +126,39 @@ class Store:
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
-        elif int(row[0]) != SCHEMA_VERSION:
+            return
+
+        found = int(row[0])
+        if found == SCHEMA_VERSION:
+            return
+        if found > SCHEMA_VERSION:
             raise RuntimeError(
-                f"cache at {self.path} uses schema v{row[0]}, this build expects "
-                f"v{SCHEMA_VERSION}. Move it aside or run: semcache clear"
+                f"cache at {self.path} was written by a newer semcache "
+                f"(schema v{found}, this build understands v{SCHEMA_VERSION}). "
+                "Upgrade semcache, or point --home somewhere else."
             )
+        self._migrate(found)
+
+    def _migrate(self, found: int) -> None:
+        """Upgrade an older cache, keeping every stored answer."""
+        if found < 2:
+            # v2 added entries.use_seq for tie-free LRU ordering. Backfill it
+            # from last_used_at so the existing eviction order is preserved.
+            columns = {r[1] for r in self.db.execute("PRAGMA table_info(entries)")}
+            if "use_seq" not in columns:
+                self.db.execute("ALTER TABLE entries ADD COLUMN use_seq INTEGER NOT NULL DEFAULT 0")
+            self.db.execute(
+                "UPDATE entries SET use_seq = ("
+                "  SELECT COUNT(*) FROM entries older"
+                "  WHERE older.last_used_at <= entries.last_used_at"
+                ")"
+            )
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_lru ON entries(namespace, use_seq)")
+
+        self.db.execute(
+            "UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
+        )
+        self.db.commit()
 
     # ------------------------------------------------------------------- reads
     def by_hash(self, prompt: str) -> Entry | None:
