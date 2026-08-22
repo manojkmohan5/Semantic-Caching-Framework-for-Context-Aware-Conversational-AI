@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  # Never let CI touch a real provider, even if a secret leaks into the env.
+  SEMCACHE_OFFLINE: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install ruff
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format check
+        run: ruff format --check .
+
+  test:
+    # Windows is in the matrix on purpose: it is the primary dev platform, and the
+    # cp1252 console + faiss wheel + os.replace paths all behave differently there.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install (core + dev only, no ONNX model)
+        run: pip install -e ".[dev]"
+      - name: Tests
+        # The hash embedder keeps this offline and deterministic: no API key,
+        # no 133MB model download, no network.
+        run: pytest
+
+  smoke:
+    # Proves the CLI actually starts and the cache round-trips on disk,
+    # which unit tests alone do not cover.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: CLI starts
+        run: |
+          semcache --version
+          semcache --help
+      - name: Offline benchmark meets its latency targets
+        # Uses StubProvider + hash embedder. Exits non-zero if a target in the
+        # plan's table regresses or if a trap pair returns a false hit.
+        run: semcache bench --offline --embedder hash --assert-targets
+      - name: Cache survives a restart
+        run: |
+          semcache ask --offline --embedder hash "what is a semantic cache"
+          semcache ask --offline --embedder hash "what is a semantic cache" | tee second.txt
+          grep -q "from cache" second.txt
+
+  bench:
+    # The real ONNX embedder, so paraphrase quality is measured for real.
+    # Split from `test` because it downloads a model; the cache keeps it cheap.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[local,dev]"
+      - name: Cache the ONNX model
+        uses: actions/cache@v4
+        with:
+          path: ~/.semcache/models
+          key: onnx-bge-small-en-v1.5-v1
+      - name: Benchmark with real embeddings
+        run: semcache bench --offline --embedder local --assert-targets
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-report
+          path: bench-report.json
+          if-no-files-found: warn
