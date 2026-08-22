@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -48,7 +50,12 @@ class VectorIndex:
             return
         if self.path and self.path.exists():
             try:
-                loaded = faiss.read_index(str(self.path), faiss.IO_FLAG_MMAP)
+                # Deliberately NOT IO_FLAG_MMAP: mmap holds an open handle on
+                # the file, and on Windows that makes another process's
+                # os.replace() fail with a sharing violation. Measured startup
+                # with a full read is 2-25ms at our scale, so mmap buys nothing
+                # worth that hazard.
+                loaded = faiss.read_index(str(self.path))
                 if loaded.d == self.dim:
                     self._index = loaded
                     return
@@ -129,11 +136,34 @@ class VectorIndex:
         if not force and self._pending < 1:
             return False
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        faiss.write_index(self._index, str(tmp))
-        os.replace(tmp, self.path)  # atomic: no half-written index is observable
-        self._pending = 0
-        return True
+        # The pid makes the temp file private to this process. Sharing one
+        # ".tmp" path let two processes write the same file at once, which
+        # corrupted it and raised PermissionError on Windows.
+        tmp = self.path.with_suffix(f"{self.path.suffix}.{os.getpid()}.tmp")
+        try:
+            faiss.write_index(self._index, str(tmp))
+            for attempt in range(4):
+                try:
+                    # Atomic: no half-written index is ever observable.
+                    os.replace(tmp, self.path)
+                    self._pending = 0
+                    return True
+                except PermissionError:
+                    # Another process holds the target open. Back off briefly;
+                    # if it never clears, losing this flush is harmless.
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
+        except (OSError, RuntimeError):
+            # A failed index flush is NOT data loss: SQLite holds the vectors and
+            # the index is rebuilt on the next open. Never fail a user's question
+            # over a cache-file write.
+            return False
+        finally:
+            if tmp.exists():
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+        return False
 
     @property
     def pending(self) -> int:

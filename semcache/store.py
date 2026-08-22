@@ -87,7 +87,9 @@ class Store:
         self.namespace = namespace
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False so a background warm-up thread can read.
-        self.db = sqlite3.connect(str(self.path), check_same_thread=False)
+        # timeout: WAL allows one writer at a time, so a second semcache process
+        # must wait rather than fail with "database is locked".
+        self.db = sqlite3.connect(str(self.path), check_same_thread=False, timeout=15.0)
         # WAL gives crash-atomic commits and lets readers run during writes.
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")

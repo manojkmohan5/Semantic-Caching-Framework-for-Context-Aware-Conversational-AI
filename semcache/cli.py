@@ -63,7 +63,8 @@ def resolve_key(cfg: Config, cli_key: str | None) -> tuple[str, str]:
     """Find a key and settle on a provider. Returns (key, provider).
 
     Order: --api-key, SEMCACHE_API_KEY, provider-specific env, .env, then ask.
-    The detected provider is always confirmed rather than assumed.
+    The guess is confirmed interactively, but never when the provider was given
+    explicitly or when there is no terminal to ask at.
     """
     if cfg.offline:
         return "", "stub"
@@ -90,9 +91,29 @@ def resolve_key(cfg: Config, cli_key: str | None) -> tuple[str, str]:
     if not key:
         raise SystemExit("No key given.")
 
-    provider = cfg.provider or guess or detect_provider(key)
-    provider = _confirm_provider(provider)
-    return key, provider
+    # An explicitly configured provider (--provider, SEMCACHE_PROVIDER, or one
+    # saved from a previous run) is already the user's answer -- asking again
+    # would make every later start interactive, and would break scripting.
+    if cfg.provider:
+        return key, cfg.provider
+
+    detected = guess or detect_provider(key)
+    if not _interactive():
+        if not detected:
+            raise SystemExit(
+                "Could not tell which provider this key is for. "
+                "Pass --provider anthropic|openai|gemini."
+            )
+        return key, detected
+    return key, _confirm_provider(detected)
+
+
+def _interactive() -> bool:
+    """False under a pipe, in CI, or in a non-tty container."""
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 def _confirm_provider(guess: str | None) -> str:
@@ -122,6 +143,8 @@ def choose_model(cfg: Config, provider: str) -> str:
     options = CATALOG.get(provider, [])
     if not options:
         return default_model(provider)
+    if not _interactive():
+        return options[0].id  # nobody to ask; take the documented default
 
     out("")
     out("  Pick a model:")
@@ -144,6 +167,9 @@ def choose_model(cfg: Config, provider: str) -> str:
 
 def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
     if cfg.offline or cfg.env_path.exists():
+        _persist_model(cfg, provider, model)
+        return
+    if not _interactive():
         _persist_model(cfg, provider, model)
         return
     answer = input(f"  Save the key to {cfg.env_path}? [Y/n] ").strip().lower()
