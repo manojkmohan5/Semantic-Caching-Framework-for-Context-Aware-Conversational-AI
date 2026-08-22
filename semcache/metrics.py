@@ -219,7 +219,17 @@ class Metrics:
 def _ms(value: float) -> str:
     if value <= 0:
         return "-"
-    return f"{value:.0f} ms" if value < 1000 else f"{value / 1000:.1f} s"
+    if value < 10:
+        return f"{value:.1f} ms"  # sub-ms hits must not render as "0 ms"
+    if value < 1000:
+        return f"{value:.0f} ms"
+    return f"{value / 1000:.1f} s"
+
+
+def _size(num_bytes: int) -> str:
+    if num_bytes < 1_048_576:
+        return f"{num_bytes / 1024:.0f} KB"
+    return f"{num_bytes / 1_048_576:.1f} MB"
 
 
 def _money(value: float) -> str:
@@ -302,9 +312,8 @@ def render_plain(agg: Aggregate, cache_stats: dict | None = None) -> str:
 
     if cache_stats:
         lines += ["", "Cache"]
-        size_mb = cache_stats["bytes"] / 1_048_576
         lines.append(
-            f"  {cache_stats['entries']} saved answers, {size_mb:.1f} MB"
+            f"  {cache_stats['entries']} saved answers, {_size(cache_stats['bytes'])}"
             f"   (room for {cache_stats['capacity']:,})"
         )
         if cache_stats.get("evicted"):
