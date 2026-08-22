@@ -489,3 +489,21 @@ def test_chat_is_the_default_subcommand():
     # help and version must reach the top-level parser untouched
     assert with_default_command(["--help"]) == ["--help"]
     assert with_default_command(["--version"]) == ["--version"]
+
+
+def test_repl_exits_cleanly(tmp_path, monkeypatch, capsys):
+    """/exit used to end in sqlite3.ProgrammingError: the answer count was read
+    after close() had shut the connection, so a normal quit printed a traceback
+    and returned 1."""
+    from semcache import cli
+
+    replies = iter(["what is a semantic cache", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(replies))
+
+    cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
+    session = cli.build_session(cfg, "", "stub", "stub-1")
+    assert cli.run_repl(cfg, session) == 0
+
+    output = capsys.readouterr().out
+    assert "Saved." in output
+    assert "Traceback" not in output

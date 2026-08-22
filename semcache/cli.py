@@ -332,8 +332,12 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
 
         _answer(session, prompt)
 
+    # Read the count BEFORE closing: close() shuts the SQLite connection, and
+    # querying it afterwards raised ProgrammingError, so every clean /exit ended
+    # in a traceback and a non-zero exit code.
+    remaining = session.cache.store.count()
     session.cache.close()
-    out(f"Saved. {session.cache.store.count()} answers cached.")
+    out(f"Saved. {remaining} answers cached.")
     return 0
 
 
