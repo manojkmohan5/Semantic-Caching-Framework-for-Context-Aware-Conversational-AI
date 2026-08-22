@@ -111,6 +111,19 @@ def resolve_key(cfg: Config, cli_key: str | None) -> tuple[str, str]:
     return key, _confirm_provider(detected)
 
 
+def _prompt(question: str, default: str = "") -> str:
+    """input() that cannot crash the app.
+
+    isatty() can report a terminal where no human is typing (piped input, CI
+    with a pseudo-tty), and then input() raises EOFError. Treating EOF and
+    Ctrl-C as "take the default" keeps every prompt non-fatal.
+    """
+    try:
+        return input(question).strip()
+    except (EOFError, KeyboardInterrupt):
+        return default
+
+
 def _interactive() -> bool:
     """False under a pipe, in CI, or in a non-tty container."""
     try:
@@ -122,14 +135,16 @@ def _interactive() -> bool:
 def _confirm_provider(guess: str | None) -> str:
     names = list(CATALOG)
     if guess:
-        answer = input(f"  This looks like an {guess} key. Use it? [Y/n] ").strip().lower()
+        answer = _prompt(f"  This looks like an {guess} key. Use it? [Y/n] ", "y").lower()
         if answer in ("", "y", "yes"):
             return guess
     out("  Which provider is this key for?")
     for i, name in enumerate(names, 1):
         out(f"    {i}) {name}")
     while True:
-        choice = input(f"  Provider [1-{len(names)}]: ").strip()
+        choice = _prompt(f"  Provider [1-{len(names)}]: ")
+        if not choice:
+            raise SystemExit("No provider chosen. Pass --provider.")
         if choice.isdigit() and 1 <= int(choice) <= len(names):
             return names[int(choice) - 1]
         if choice in names:
@@ -170,7 +185,7 @@ def choose_model(cfg: Config, provider: str) -> str:
             raise SystemExit(f"{provider} needs a model name. Pass --model {example}")
         out("")
         out(f"  Which {provider} model? Example: {example}")
-        typed = input("  Model: ").strip()
+        typed = _prompt("  Model: ")
         if not typed:
             raise SystemExit(f"{provider} needs a model name. Pass --model {example}")
         return typed
@@ -187,7 +202,7 @@ def choose_model(cfg: Config, provider: str) -> str:
         )
         default = "  (default)" if i == 1 else ""
         out(f"    {i}) {info.id:<20} {price:<26} {info.blurb}{default}")
-    choice = input(f"  Model [1-{len(options)}, Enter for 1]: ").strip()
+    choice = _prompt(f"  Model [1-{len(options)}, Enter for 1]: ")
     picked = (
         options[int(choice) - 1]
         if choice.isdigit() and 1 <= int(choice) <= len(options)
@@ -203,7 +218,7 @@ def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
     if not _interactive():
         _persist_model(cfg, provider, model)
         return
-    answer = input(f"  Save the key to {cfg.env_path}? [Y/n] ").strip().lower()
+    answer = _prompt(f"  Save the key to {cfg.env_path}? [Y/n] ", "n").lower()
     if answer in ("", "y", "yes"):
         try:
             cfg.home.mkdir(parents=True, exist_ok=True)
@@ -324,7 +339,7 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
             out(render_plain(session.metrics.aggregate(), session.cache.stats()))
             continue
         if lowered == "/clear":
-            confirm = input("  Forget every saved answer? [y/N] ").strip().lower()
+            confirm = _prompt("  Forget every saved answer? [y/N] ", "n").lower()
             if confirm in ("y", "yes"):
                 removed = session.cache.clear()
                 out(f"  Cleared {removed} saved answers.")

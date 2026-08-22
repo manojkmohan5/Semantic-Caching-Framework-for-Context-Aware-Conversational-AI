@@ -137,3 +137,28 @@ def test_custom_requires_an_explicit_endpoint():
 def test_base_url_overrides_the_preset():
     cfg = Config.load(base_url="https://my-gateway.internal/v1")
     assert build_provider("grok", "k", "m", cfg).base_url == ("https://my-gateway.internal/v1")
+
+
+def test_provider_errors_are_one_readable_line():
+    """SDKs stringify to the whole JSON body. Printing that put a wall of braces
+    in the chat on every turn while the condition lasted."""
+    from semcache.providers import _summarize
+
+    raw = (
+        "Error code: 402 - {'error': {'message': 'Insufficient credits. This "
+        "account never purchased credits. Make sure your key is on the correct "
+        "account, and purchase more at https://openrouter.ai/settings/credits', "
+        "'code': 402}}"
+    )
+    assert _summarize(raw) == "Insufficient credits"
+
+    payment = ProviderError(raw, "payment")
+    assert "no credits" in payment.user_message
+    assert "{" not in payment.user_message  # no JSON reaches the user
+    assert "--model" in payment.user_message  # and it says what to do
+
+    missing = ProviderError("nope", "not_found", detail="bad/model-1")
+    assert "bad/model-1" in missing.user_message
+
+    # An unmapped error still collapses to a sentence, not a blob.
+    assert ProviderError(raw, "error").user_message == "Insufficient credits"

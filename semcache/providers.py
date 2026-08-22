@@ -133,19 +133,66 @@ class ChatResult:
 class ProviderError(Exception):
     """One error type for every SDK, carrying whether a retry could ever help."""
 
-    def __init__(self, message: str, kind: str = "error", *, transient: bool = False):
+    def __init__(
+        self,
+        message: str,
+        kind: str = "error",
+        *,
+        transient: bool = False,
+        detail: str = "",
+    ):
         super().__init__(message)
-        self.kind = kind  # rate_limit | auth | network | timeout | error
+        # rate_limit | auth | payment | not_found | network | timeout | error
+        self.kind = kind
         self.transient = transient
+        #: Short human-readable summary, without the provider's JSON envelope.
+        self.detail = detail or _summarize(message)
 
     @property
     def user_message(self) -> str:
-        return {
+        fixed = {
             "rate_limit": "the model is rate-limited",
             "auth": "the API key was rejected",
             "network": "cannot reach the model",
             "timeout": "the model timed out",
-        }.get(self.kind, str(self))
+            "payment": "this account has no credits for that model"
+            " -- add credits, or pick a cheaper/free model with --model",
+            "not_found": f"the provider does not have a model called {self.detail!r}"
+            " -- check the name and pass --model",
+        }
+        if self.kind in fixed:
+            return fixed[self.kind]
+        # Unknown failures still get one readable line rather than a wall of
+        # provider JSON repeated on every turn.
+        return self.detail or str(self)
+
+
+def _summarize(text: str) -> str:
+    """Pull the human sentence out of a provider error.
+
+    SDKs stringify to the whole JSON body, so printing str(exc) put a wall of
+    braces in the middle of the chat -- on every single turn while the condition
+    lasted.
+    """
+    raw = str(text)
+    for marker in ("'message': '", '"message": "'):
+        if marker in raw:
+            rest = raw.split(marker, 1)[1]
+            end = rest.find("'") if marker.endswith("'") else rest.find('"')
+            if end > 0:
+                sentence = rest[:end]
+                # Keep it to the first sentence; the rest is usually a URL hint.
+                return sentence.split(". ")[0].strip().rstrip(".")
+    return raw.splitlines()[0][:200]
+
+
+def _model_of(exc) -> str:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            return str(err.get("param") or err.get("code") or "")
+    return ""
 
 
 def _redact(text: str) -> str:
@@ -443,6 +490,10 @@ def _map_anthropic(sdk, exc: Exception) -> ProviderError:
     if isinstance(exc, sdk.APIConnectionError):
         return ProviderError(msg, "network", transient=True)
     if isinstance(exc, sdk.APIStatusError):
+        if exc.status_code == 402:
+            return ProviderError(msg, "payment")
+        if exc.status_code == 404:
+            return ProviderError(msg, "not_found", detail=_model_of(exc))
         return ProviderError(msg, "error", transient=exc.status_code >= 500)
     return ProviderError(msg, "error")
 
@@ -458,6 +509,10 @@ def _map_openai(sdk, exc: Exception) -> ProviderError:
     if isinstance(exc, sdk.APIConnectionError):
         return ProviderError(msg, "network", transient=True)
     if isinstance(exc, sdk.APIStatusError):
+        if exc.status_code == 402:
+            return ProviderError(msg, "payment")
+        if exc.status_code == 404:
+            return ProviderError(msg, "not_found", detail=_model_of(exc))
         return ProviderError(msg, "error", transient=exc.status_code >= 500)
     return ProviderError(msg, "error")
 
@@ -467,6 +522,10 @@ def _map_gemini(errors, exc: Exception) -> ProviderError:
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
     if code == 429:
         return ProviderError(msg, "rate_limit", transient=True)
+    if code == 402:
+        return ProviderError(msg, "payment")
+    if code == 404:
+        return ProviderError(msg, "not_found")
     if code in (401, 403):
         return ProviderError(msg, "auth")
     if isinstance(exc, getattr(errors, "ServerError", ())):
