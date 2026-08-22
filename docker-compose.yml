@@ -21,6 +21,14 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Any other host: set the key here plus PROVIDER (and MODEL) below.
+      #   grok | deepseek | kimi | glm | nvidia | groq | openrouter |
+      #   together | ollama | lmstudio | custom
+      SEMCACHE_API_KEY: ${SEMCACHE_API_KEY:-}
+      SEMCACHE_PROVIDER: ${SEMCACHE_PROVIDER:-}
+      SEMCACHE_MODEL: ${SEMCACHE_MODEL:-}
+      # Overrides the built-in endpoint for an OpenAI-compatible host.
+      SEMCACHE_BASE_URL: ${SEMCACHE_BASE_URL:-}
       # Isolate one project's answers from another; unset means a shared cache.
       SEMCACHE_PROJECT: ${SEMCACHE_PROJECT:-}
     volumes:
