@@ -160,6 +160,10 @@ class Config:
             # then re-read that project's own config so a model saved there sticks.
             # `home` is deliberately excluded from these re-overlays: re-applying
             # it would undo the scoping we just did.
+            # The embedding model is not project data. Pin it to the root home
+            # before scoping, or every project re-downloads its own 130MB copy.
+            if not cfg.model_cache_dir:
+                cfg = replace(cfg, model_cache_dir=str(cfg.home / "models"))
             cfg = replace(cfg, home=cfg.home / "projects" / slug(cfg.project))
             cfg = _overlay(cfg, _drop_home(_from_file(cfg.config_path)))
             cfg = _overlay(cfg, _drop_home(_from_env()))

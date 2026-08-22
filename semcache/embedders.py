@@ -7,6 +7,7 @@ cosine similarity -- no separate cosine function anywhere in the codebase.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 
 import numpy as np
@@ -87,6 +88,11 @@ class LocalEmbedder(Embedder):
 
     def _load(self):
         if self._model is None:
+            # Windows without Developer Mode cannot create the symlinks the HF
+            # cache prefers; it falls back correctly but logs a scary
+            # WinError 1314 first. Silence the noise before importing.
+            os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             try:
                 from fastembed import TextEmbedding
             except ImportError as exc:

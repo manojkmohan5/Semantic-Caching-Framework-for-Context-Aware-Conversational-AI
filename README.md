@@ -226,6 +226,14 @@ with SemCache(project="my-service") as cache:
     print(cache.report())
 ```
 
+A runnable version of the above is in
+[examples/use_the_api.py](examples/use_the_api.py):
+
+```bash
+python examples/use_the_api.py --offline        # no key, no cost
+python examples/use_the_api.py --key sk-or-v1-... --provider openrouter     --model "liquid/lfm-2.5-2.6b:free"
+```
+
 `ask()` takes an `on_chunk` callback for streaming. With no arguments `SemCache()`
 reads the key from the environment and infers the provider from its shape.
 Construct one per worker; it is not thread-safe.
