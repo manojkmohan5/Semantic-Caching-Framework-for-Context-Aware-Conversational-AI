@@ -29,6 +29,12 @@ from .providers import (
     detect_provider,
     needs_explicit_model,
 )
+from .ui import Style, dashboard, footer, redraw_last_line, user_block
+from .ui import prompt as ui_prompt
+
+#: Resolved once at import; colour is dropped automatically when stdout is not a
+#: terminal, so piped output and log files stay clean.
+STYLE = Style()
 
 KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -260,27 +266,37 @@ def _persist_model(cfg: Config, provider: str, model: str) -> None:
 # ------------------------------------------------------------------ status line
 
 
-def status_line(turn) -> str:
+def status_line(turn, style: Style | None = None) -> str:
+    """One line, always the same four facts: source, time, tokens, cost/saving."""
+    st = style or STYLE
     r = turn.record
-    tokens = f"{r.prompt_tokens:,} in / {r.response_tokens:,} out"
+    tokens = st.faint(f"{r.prompt_tokens:,} in / {r.response_tokens:,} out")
     took = _short(r.total_ms)
+    sep = st.faint(" · ")
 
     if turn.outcome == "error":
-        return f"  {turn.note}"
-    if turn.outcome in {"exact", "semantic", "degraded"}:
-        bits = ["from cache", took, tokens]
-        if r.cost_saved_usd:
-            bits.append(f"saved ${r.cost_saved_usd:.4f}")
-        if turn.note:
-            bits.append(turn.note)
-        return "  " + " · ".join(bits)
+        return "  " + st.error("✗ " + turn.note)
 
-    bits = ["asked the model", took, tokens]
+    if turn.outcome == "degraded":
+        bits = [st.warn("~ from cache"), st.warn(took), tokens]
+        if turn.note:
+            bits.append(st.warn(turn.note))
+        return "  " + sep.join(bits)
+
+    if turn.outcome in {"exact", "semantic"}:
+        bits = [st.hit("✓ from cache"), st.hit(st.strong(took)), tokens]
+        if r.cost_saved_usd:
+            bits.append(st.hit(f"saved ${r.cost_saved_usd:.4f}"))
+        if turn.note:
+            bits.append(st.faint(turn.note))
+        return "  " + sep.join(bits)
+
+    bits = [st.miss("→ asked the model"), took, tokens]
     if r.cost_usd:
         bits.append(f"${r.cost_usd:.4f}")
     if turn.note:
-        bits.append(turn.note)
-    return "  " + " · ".join(bits)
+        bits.append(st.faint(turn.note))
+    return "  " + sep.join(bits)
 
 
 def _short(ms: float) -> str:
@@ -294,14 +310,12 @@ def _short(ms: float) -> str:
 # -------------------------------------------------------------------- the REPL
 
 
-HELP = """
-  Just type a question and press Enter.
-
-  /stats   what the cache has saved you
-  /clear   forget every saved answer
-  /help    this
-  /exit    quit  (Ctrl-D also works)
-"""
+def help_text(style: Style) -> str:
+    """One source of truth for the command list -- see COMMANDS."""
+    lines = ["", "  " + style.faint("Type a question and press Enter."), ""]
+    lines += [f"  {style.strong(cmd.ljust(8))} {style.faint(what)}" for cmd, what in COMMANDS]
+    lines.append("")
+    return "\n".join(lines)
 
 
 def build_session(cfg: Config, key: str, provider_name: str, model: str) -> ChatSession:
@@ -313,16 +327,70 @@ def build_session(cfg: Config, key: str, provider_name: str, model: str) -> Chat
     return session
 
 
-def run_repl(cfg: Config, session: ChatSession) -> int:
+COMMANDS = (
+    ("/stats", "what the cache has saved you"),
+    ("/dash", "show this dashboard again"),
+    ("/clear", "forget every saved answer"),
+    ("/help", "the command list"),
+    ("/exit", "quit  (Ctrl-D also works)"),
+)
+
+
+def _dashboard(cfg: Config, session: ChatSession) -> str:
+    """Three panels: what is loaded, what is cached, what it has saved so far.
+
+    Savings are lifetime, read back from metrics.jsonl, because "what has this
+    cache done for me" is a more useful thing to land on than a row of zeros.
+    """
+    st = STYLE
     stats = session.cache.stats()
-    out("")
-    out(f"Ready. {stats['entries']} answers cached.")
-    out("Type your question. /help for commands, /exit to quit.")
+    lifetime = Aggregate.of(session.metrics.load_all())
+
+    model = st.strong(session.provider.model)
+    entries = st.hit(f"{stats['entries']} answers") if stats["entries"] else st.faint("empty")
+    saved = (
+        st.hit(f"${lifetime.cost_saved:.4f} saved")
+        if lifetime.cost_saved
+        else st.faint("cost not tracked")
+    )
+    panels = [
+        (
+            "model",
+            [
+                st.strong(session.provider.name),
+                model,
+                st.faint(f"threshold {cfg.threshold:g}"),
+            ],
+        ),
+        (
+            "cache",
+            [
+                entries,
+                st.faint(f"{stats['bytes'] / 1024:.0f} KB / {stats['capacity']:,} max"),
+                st.faint(session.embedder.id.split("/")[-1]),
+            ],
+        ),
+        (
+            "saved so far",
+            [
+                st.hit(f"{lifetime.hit_rate * 100:.0f}% hit rate")
+                if lifetime.total
+                else st.faint("no history yet"),
+                st.faint(f"{lifetime.calls_avoided} calls avoided"),
+                saved,
+            ],
+        ),
+    ]
+    return dashboard(st, __version__, panels, list(COMMANDS))
+
+
+def run_repl(cfg: Config, session: ChatSession) -> int:
+    out(_dashboard(cfg, session))
     session.warm_async()
 
     while True:
         try:
-            prompt = input("\nyou > ").strip()
+            prompt = input("\n" + ui_prompt(STYLE)).strip()
         except (EOFError, KeyboardInterrupt):
             out("")
             break
@@ -333,7 +401,7 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
         if lowered in ("/exit", "/quit"):
             break
         if lowered == "/help":
-            out(HELP)
+            out(help_text(STYLE))
             continue
         if lowered == "/stats":
             out(render_plain(session.metrics.aggregate(), session.cache.stats()))
@@ -345,15 +413,39 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
                 out(f"  Cleared {removed} saved answers.")
             continue
 
+        # Re-render the question as a framed block. The terminal already echoed
+        # what was typed, so the echo is erased first; when colour is off there
+        # is no cursor control to rely on, so the echo is simply left as-is.
+        if STYLE.enabled:
+            sys.stdout.write(redraw_last_line())
+            out(user_block(STYLE, prompt))
+
         _answer(session, prompt)
+
+        stats = session.cache.stats()
+        out(
+            footer(
+                STYLE,
+                session.provider.name,
+                session.provider.model,
+                stats["entries"],
+                session.metrics.aggregate().hit_rate,
+            )
+        )
 
     # Read the count BEFORE closing: close() shuts the SQLite connection, and
     # querying it afterwards raised ProgrammingError, so every clean /exit ended
     # in a traceback and a non-zero exit code.
     remaining = session.cache.store.count()
     session.cache.close()
-    out(f"Saved. {remaining} answers cached.")
+    out(STYLE.faint(f"  saved · {remaining} answers cached"))
     return 0
+
+
+def _erase_line() -> str:
+    """Clear the live status line. Uses the ANSI erase when the terminal supports
+    it; padding with spaces left a visible row of blanks in piped output."""
+    return "\r\033[2K" if STYLE.enabled else "\r" + " " * 70 + "\r"
 
 
 def _answer(session: ChatSession, prompt: str) -> None:
@@ -369,7 +461,7 @@ def _answer(session: ChatSession, prompt: str) -> None:
         sys.stdout.write(piece)
         sys.stdout.flush()
 
-    sys.stdout.write("  asking the model...")
+    sys.stdout.write("  " + STYLE.faint("asking the model..."))
     sys.stdout.flush()
     turn = session.ask(prompt, on_chunk=on_chunk)
     if not state["started"]:

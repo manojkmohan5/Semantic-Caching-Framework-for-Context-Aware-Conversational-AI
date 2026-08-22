@@ -19,6 +19,10 @@ import numpy as np
 from .config import SCHEMA_VERSION
 
 _WS = re.compile(r"\s+")
+#: Zero-width and BOM characters ride along in pasted text and in piped input.
+#: They are invisible but change the hash, so an identical question missed the
+#: exact tier and fell through to a semantic match.
+_INVISIBLE = re.compile("[﻿​‌‍⁠]")
 
 META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -59,7 +63,8 @@ CREATE INDEX IF NOT EXISTS idx_lru  ON entries(namespace, use_seq);
 
 def normalize(prompt: str) -> str:
     """Canonical form for exact matching. NORMALIZE_VERSION guards changes here."""
-    return _WS.sub(" ", (prompt or "").strip()).casefold()
+    cleaned = _INVISIBLE.sub("", prompt or "")
+    return _WS.sub(" ", cleaned.strip()).casefold()
 
 
 def prompt_hash(prompt: str) -> str:

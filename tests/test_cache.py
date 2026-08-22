@@ -496,7 +496,7 @@ def test_repl_exits_cleanly(tmp_path, monkeypatch, capsys):
     assert cli.run_repl(cfg, session) == 0
 
     output = capsys.readouterr().out
-    assert "Saved." in output
+    assert "answers cached" in output
     assert "Traceback" not in output
 
 
@@ -578,3 +578,18 @@ def test_a_newer_cache_is_refused_with_a_clear_message(tmp_path):
     store.close()
     with pytest.raises(RuntimeError, match="newer semcache"):
         Store(db, "ns")
+
+
+def test_invisible_characters_do_not_defeat_the_exact_tier(tmp_path):
+    """A BOM or zero-width space rides along in pasted text and piped input. It
+    is invisible but changed the hash, so the same question missed the exact
+    tier and fell through to a semantic match."""
+    assert normalize("\ufeffwhat is a cache?") == normalize("what is a cache?")
+    assert prompt_hash("\u200bhello\u200b there") == prompt_hash("hello there")
+
+    cache = make_cache(tmp_path)
+    add(cache, "what is a semantic cache?", "the answer")
+    hit, _ = cache.lookup("\ufeffwhat is a semantic cache?", None, "s1")
+    assert hit is not None
+    assert hit.kind == "exact", "a BOM must not push this into the semantic tier"
+    cache.close()
