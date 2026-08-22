@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2 added entries.use_seq for tie-free LRU ordering
 #: Bump when prompt normalization changes. Old vectors were built from differently
 #: normalized text, so they must not be compared against new ones.
 NORMALIZE_VERSION = 1

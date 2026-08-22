@@ -447,3 +447,27 @@ def test_offline_needs_no_key_at_all(tmp_path):
 
     key, provider = cli.resolve_key(Config.load(home=tmp_path, offline=True), None)
     assert (key, provider) == ("", "stub")
+
+
+def test_lru_survives_a_coarse_clock(tmp_path, monkeypatch):
+    """time.time() has ~15.6ms resolution on Windows, so entries written in
+    quick succession share a timestamp. Ordering by it could then evict the
+    most-recently-used entry. Pinned by freezing the clock outright."""
+    import semcache.store as store_mod
+
+    monkeypatch.setattr(store_mod.time, "time", lambda: 1_000_000.0)
+
+    cache = make_cache(tmp_path, max_entries=3)
+    for i in range(3):
+        add(cache, f"frozen clock entry {i}", f"answer {i}")
+
+    # Reuse the oldest so it becomes most-recently-used, under a frozen clock.
+    assert look(cache, "frozen clock entry 0")[0] is not None
+    add(cache, "frozen clock entry 3", "answer 3")
+
+    assert cache.store.count() == 3
+    assert len(cache.index) == 3
+    # The reused entry must survive even though every timestamp is identical.
+    assert look(cache, "frozen clock entry 0")[0] is not None
+    assert cache.store.by_hash("frozen clock entry 1") is None
+    cache.close()

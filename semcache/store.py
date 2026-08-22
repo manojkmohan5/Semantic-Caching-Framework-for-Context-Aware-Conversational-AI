@@ -40,10 +40,15 @@ CREATE TABLE IF NOT EXISTS entries (
     last_used_at    REAL    NOT NULL,
     hit_count       INTEGER NOT NULL DEFAULT 0,
     prompt_tokens   INTEGER NOT NULL DEFAULT 0,
-    response_tokens INTEGER NOT NULL DEFAULT 0
+    response_tokens INTEGER NOT NULL DEFAULT 0,
+    -- Monotonic use counter. last_used_at is a wall clock with ~15.6ms
+    -- resolution on Windows, so entries written in quick succession tie and
+    -- "ORDER BY last_used_at" could evict the most-recently-used entry. This
+    -- never ties, so LRU ordering is exact.
+    use_seq         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_hash ON entries(namespace, prompt_hash);
-CREATE INDEX IF NOT EXISTS idx_lru  ON entries(namespace, last_used_at);
+CREATE INDEX IF NOT EXISTS idx_lru  ON entries(namespace, use_seq);
 """
 
 
@@ -180,8 +185,9 @@ class Store:
         cur = self.db.execute(
             "INSERT INTO entries (namespace, prompt_hash, prompt, response, vector,"
             " session_id, provider, model, embedder, created_at, last_used_at,"
-            " hit_count, prompt_tokens, response_tokens)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)",
+            " hit_count, prompt_tokens, response_tokens, use_seq)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?,"
+            " (SELECT IFNULL(MAX(use_seq), 0) + 1 FROM entries))",
             (
                 self.namespace,
                 prompt_hash(prompt),
@@ -202,9 +208,12 @@ class Store:
         return int(cur.lastrowid)
 
     def touch(self, entry_id: int) -> None:
-        """Record a reuse. This is what makes eviction LRU rather than FIFO."""
+        """Record a reuse: bumps both the display timestamp and the monotonic
+        use counter. This is what makes eviction LRU rather than FIFO."""
         self.db.execute(
-            "UPDATE entries SET last_used_at=?, hit_count=hit_count+1 WHERE id=?",
+            "UPDATE entries SET last_used_at=?, hit_count=hit_count+1,"
+            " use_seq=(SELECT IFNULL(MAX(use_seq), 0) + 1 FROM entries)"
+            " WHERE id=?",
             (time.time(), entry_id),
         )
         self.db.commit()
@@ -213,7 +222,7 @@ class Store:
         if over_by <= 0:
             return []
         cur = self.db.execute(
-            "SELECT id FROM entries WHERE namespace=? ORDER BY last_used_at ASC LIMIT ?",
+            "SELECT id FROM entries WHERE namespace=? ORDER BY use_seq ASC, id ASC LIMIT ?",
             (self.namespace, over_by),
         )
         return [int(r[0]) for r in cur]
