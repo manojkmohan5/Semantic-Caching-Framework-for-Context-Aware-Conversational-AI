@@ -1,0 +1,424 @@
+"""Chat providers behind one streaming interface, picked from the shape of the API key.
+
+Each provider uses its vendor's official SDK, imported lazily so that installing
+one provider never drags in the other two. The SDKs already retry 429/5xx with
+backoff and honour Retry-After, so this module does not hand-roll any of that --
+it only configures them and maps their exceptions onto one error type.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Iterator
+
+# ---------------------------------------------------------------- model catalog
+
+
+@dataclass(frozen=True)
+class ModelInfo:
+    id: str
+    blurb: str
+    #: USD per million tokens. None means "unknown to us" -- we report no cost
+    #: rather than inventing a number. Override in config.json to enable costs.
+    price_in: float | None = None
+    price_out: float | None = None
+    #: Current Anthropic models removed the temperature parameter entirely and
+    #: return 400 if it is sent. Not "deprecated" -- rejected.
+    supports_temperature: bool = True
+
+
+# Anthropic prices are first-party API rates as documented 2026-06-24.
+# OpenAI and Google prices are intentionally left None: shipping a stale or
+# guessed price would make the savings figures dishonest. Set them in
+# ~/.semcache/config.json under "prices" to turn cost reporting on.
+CATALOG: dict[str, list[ModelInfo]] = {
+    "anthropic": [
+        ModelInfo("claude-sonnet-5", "balanced, fastest of the three", 3.00, 15.00, False),
+        ModelInfo("claude-opus-5", "most capable", 5.00, 25.00, False),
+        ModelInfo("claude-haiku-4-5", "cheapest, lowest latency", 1.00, 5.00, True),
+    ],
+    "openai": [
+        ModelInfo("gpt-5-mini", "small and fast"),
+        ModelInfo("gpt-5", "most capable"),
+    ],
+    "gemini": [
+        ModelInfo("gemini-2.5-flash", "fast and cheap"),
+        ModelInfo("gemini-2.5-pro", "most capable"),
+    ],
+}
+
+EMBEDDING_MODELS = {
+    "openai": ("text-embedding-3-small", 1536),
+    "gemini": ("gemini-embedding-001", 3072),
+}
+
+
+def detect_provider(api_key: str) -> str | None:
+    """Guess the provider from the key prefix. Always confirmed by the user."""
+    key = (api_key or "").strip()
+    if key.startswith("sk-ant-"):
+        return "anthropic"
+    if key.startswith(("sk-", "sess-")):
+        return "openai"
+    if key.startswith("AIza"):
+        return "gemini"
+    return None
+
+
+def default_model(provider: str) -> str:
+    return CATALOG[provider][0].id
+
+
+def model_info(provider: str, model: str) -> ModelInfo:
+    for info in CATALOG.get(provider, []):
+        if info.id == model:
+            return info
+    # A model we do not know about is still usable -- we just cannot price it,
+    # and we must not assume it tolerates `temperature`.
+    return ModelInfo(model, "custom", None, None, provider != "anthropic")
+
+
+# --------------------------------------------------------------------- results
+
+
+@dataclass
+class ChatResult:
+    text: str
+    input_tokens: int
+    output_tokens: int
+    stop_reason: str
+    model: str
+
+    @property
+    def truncated(self) -> bool:
+        """A truncated answer must never be cached -- it would be served forever."""
+        return self.stop_reason in {"max_tokens", "length", "MAX_TOKENS"}
+
+
+class ProviderError(Exception):
+    """One error type for every SDK, carrying whether a retry could ever help."""
+
+    def __init__(self, message: str, kind: str = "error", *, transient: bool = False):
+        super().__init__(message)
+        self.kind = kind  # rate_limit | auth | network | timeout | error
+        self.transient = transient
+
+    @property
+    def user_message(self) -> str:
+        return {
+            "rate_limit": "the model is rate-limited",
+            "auth": "the API key was rejected",
+            "network": "cannot reach the model",
+            "timeout": "the model timed out",
+        }.get(self.kind, str(self))
+
+
+def _redact(text: str) -> str:
+    """Strip anything key-shaped out of an error before it is shown or logged."""
+    out = []
+    for word in str(text).split():
+        if len(word) > 20 and word.startswith(("sk-", "sk-ant-", "AIza", "sess-")):
+            out.append(word[:7] + "...redacted")
+        else:
+            out.append(word)
+    return " ".join(out)
+
+
+# ------------------------------------------------------------------- providers
+
+
+class Provider:
+    """Base class. One instance per session; `stream_chat` is not re-entrant.
+
+    ponytail: single-threaded by construction (one REPL, one provider instance).
+    Give each caller its own instance if this ever serves concurrent requests.
+    """
+
+    name = "base"
+
+    def __init__(self, api_key: str, model: str, cfg):
+        self.api_key = api_key
+        self.model = model
+        self.cfg = cfg
+        self.result: ChatResult | None = None
+
+    def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
+        raise NotImplementedError
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise ProviderError(f"{self.name} has no embedding API", "error")
+
+    # Chat history is sent as plain alternating turns -- every SDK accepts that shape.
+    def _messages(self, prompt: str, history: list[dict]) -> list[dict]:
+        return [*history, {"role": "user", "content": prompt}]
+
+
+class AnthropicProvider(Provider):
+    name = "anthropic"
+
+    def _client(self):
+        try:
+            import anthropic
+        except ImportError as exc:  # pragma: no cover - install-time path
+            raise ProviderError(
+                'anthropic SDK not installed. Run: pip install "semcache[anthropic]"', "error"
+            ) from exc
+        self._sdk = anthropic
+        return anthropic.Anthropic(
+            api_key=self.api_key,
+            timeout=self.cfg.timeout_read,
+            max_retries=self.cfg.max_retries,
+        )
+
+    def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
+        client = self._client()
+        kwargs: dict = {
+            "model": self.model,
+            "max_tokens": self.cfg.max_tokens,
+            "messages": self._messages(prompt, history),
+        }
+        # Current Anthropic models reject `temperature` with a 400.
+        if model_info("anthropic", self.model).supports_temperature:
+            kwargs["temperature"] = self.cfg.temperature
+        if self.cfg.effort:
+            kwargs["output_config"] = {"effort": self.cfg.effort}
+
+        try:
+            with client.messages.stream(**kwargs) as stream:
+                yield from stream.text_stream
+                final = stream.get_final_message()
+        except Exception as exc:
+            raise _map_anthropic(self._sdk, exc) from exc
+
+        self.result = ChatResult(
+            text="".join(b.text for b in final.content if b.type == "text"),
+            input_tokens=final.usage.input_tokens,
+            output_tokens=final.usage.output_tokens,
+            stop_reason=final.stop_reason or "end_turn",
+            model=final.model,
+        )
+
+
+class OpenAIProvider(Provider):
+    name = "openai"
+
+    def _client(self):
+        try:
+            import openai
+        except ImportError as exc:  # pragma: no cover
+            raise ProviderError(
+                'openai SDK not installed. Run: pip install "semcache[openai]"', "error"
+            ) from exc
+        self._sdk = openai
+        return openai.OpenAI(
+            api_key=self.api_key,
+            timeout=self.cfg.timeout_read,
+            max_retries=self.cfg.max_retries,
+        )
+
+    def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
+        client = self._client()
+        chunks: list[str] = []
+        usage = None
+        finish = "stop"
+        try:
+            stream = client.chat.completions.create(
+                model=self.model,
+                messages=self._messages(prompt, history),
+                max_completion_tokens=self.cfg.max_tokens,
+                temperature=self.cfg.temperature,
+                stream=True,
+                # Without this, a streamed response carries no token counts at all.
+                stream_options={"include_usage": True},
+            )
+            for event in stream:
+                if event.usage:
+                    usage = event.usage
+                for choice in event.choices or []:
+                    if choice.finish_reason:
+                        finish = choice.finish_reason
+                    piece = choice.delta.content if choice.delta else None
+                    if piece:
+                        chunks.append(piece)
+                        yield piece
+        except Exception as exc:
+            raise _map_openai(self._sdk, exc) from exc
+
+        self.result = ChatResult(
+            text="".join(chunks),
+            input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            stop_reason=finish,
+            model=self.model,
+        )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        client = self._client()
+        try:
+            resp = client.embeddings.create(model=EMBEDDING_MODELS["openai"][0], input=texts)
+        except Exception as exc:
+            raise _map_openai(self._sdk, exc) from exc
+        return [item.embedding for item in resp.data]
+
+
+class GeminiProvider(Provider):
+    name = "gemini"
+
+    def _client(self):
+        try:
+            from google import genai
+            from google.genai import errors as genai_errors
+        except ImportError as exc:  # pragma: no cover
+            raise ProviderError(
+                'google-genai SDK not installed. Run: pip install "semcache[gemini]"', "error"
+            ) from exc
+        self._errors = genai_errors
+        return genai.Client(api_key=self.api_key)
+
+    def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
+        client = self._client()
+        contents = [
+            {"role": "model" if m["role"] == "assistant" else "user",
+             "parts": [{"text": m["content"]}]}
+            for m in self._messages(prompt, history)
+        ]
+        chunks: list[str] = []
+        usage = None
+        finish = "STOP"
+        try:
+            for event in client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config={
+                    "temperature": self.cfg.temperature,
+                    "max_output_tokens": self.cfg.max_tokens,
+                },
+            ):
+                if getattr(event, "usage_metadata", None):
+                    usage = event.usage_metadata
+                for cand in getattr(event, "candidates", None) or []:
+                    if cand.finish_reason:
+                        finish = str(cand.finish_reason)
+                if event.text:
+                    chunks.append(event.text)
+                    yield event.text
+        except Exception as exc:
+            raise _map_gemini(self._errors, exc) from exc
+
+        self.result = ChatResult(
+            text="".join(chunks),
+            input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+            output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+            stop_reason=finish,
+            model=self.model,
+        )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        client = self._client()
+        try:
+            resp = client.models.embed_content(
+                model=EMBEDDING_MODELS["gemini"][0], contents=texts
+            )
+        except Exception as exc:
+            raise _map_gemini(self._errors, exc) from exc
+        return [list(e.values) for e in resp.embeddings]
+
+
+class StubProvider(Provider):
+    """Deterministic canned answers. Powers the test suite and `bench --offline`,
+    so CI never needs a key, a network, or a cent."""
+
+    name = "stub"
+    delay = 0.8
+
+    def __init__(self, api_key: str = "", model: str = "stub-1", cfg=None):
+        super().__init__(api_key, model, cfg)
+
+    def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
+        text = f"Stub answer about {prompt.strip()[:60]}. " * 3
+        per_chunk = self.delay / 8
+        for word in text.split(" "):
+            time.sleep(per_chunk / 8)
+            yield word + " "
+        self.result = ChatResult(
+            text=text,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(text) // 4),
+            stop_reason="end_turn",
+            model=self.model,
+        )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        from .embedders import HashEmbedder
+
+        return [list(v) for v in HashEmbedder().encode(texts)]
+
+
+_CLASSES = {
+    "anthropic": AnthropicProvider,
+    "openai": OpenAIProvider,
+    "gemini": GeminiProvider,
+    "stub": StubProvider,
+}
+
+
+def build_provider(provider: str, api_key: str, model: str, cfg) -> Provider:
+    if cfg is not None and getattr(cfg, "offline", False):
+        return StubProvider(cfg=cfg)
+    try:
+        cls = _CLASSES[provider]
+    except KeyError:
+        raise ProviderError(f"unknown provider {provider!r}", "error") from None
+    return cls(api_key, model, cfg)
+
+
+# ------------------------------------------------------- exception translation
+
+
+def _map_anthropic(sdk, exc: Exception) -> ProviderError:
+    msg = _redact(exc)
+    if isinstance(exc, sdk.RateLimitError):
+        return ProviderError(msg, "rate_limit", transient=True)
+    if isinstance(exc, (sdk.AuthenticationError, sdk.PermissionDeniedError)):
+        return ProviderError(msg, "auth")
+    if isinstance(exc, sdk.APITimeoutError):
+        return ProviderError(msg, "timeout", transient=True)
+    if isinstance(exc, sdk.APIConnectionError):
+        return ProviderError(msg, "network", transient=True)
+    if isinstance(exc, sdk.APIStatusError):
+        return ProviderError(msg, "error", transient=exc.status_code >= 500)
+    return ProviderError(msg, "error")
+
+
+def _map_openai(sdk, exc: Exception) -> ProviderError:
+    msg = _redact(exc)
+    if isinstance(exc, sdk.RateLimitError):
+        return ProviderError(msg, "rate_limit", transient=True)
+    if isinstance(exc, (sdk.AuthenticationError, sdk.PermissionDeniedError)):
+        return ProviderError(msg, "auth")
+    if isinstance(exc, sdk.APITimeoutError):
+        return ProviderError(msg, "timeout", transient=True)
+    if isinstance(exc, sdk.APIConnectionError):
+        return ProviderError(msg, "network", transient=True)
+    if isinstance(exc, sdk.APIStatusError):
+        return ProviderError(msg, "error", transient=exc.status_code >= 500)
+    return ProviderError(msg, "error")
+
+
+def _map_gemini(errors, exc: Exception) -> ProviderError:
+    msg = _redact(exc)
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code == 429:
+        return ProviderError(msg, "rate_limit", transient=True)
+    if code in (401, 403):
+        return ProviderError(msg, "auth")
+    if isinstance(exc, getattr(errors, "ServerError", ())):
+        return ProviderError(msg, "error", transient=True)
+    if isinstance(exc, (TimeoutError,)):
+        return ProviderError(msg, "timeout", transient=True)
+    if isinstance(exc, (ConnectionError, OSError)) and not isinstance(
+        exc, getattr(errors, "APIError", ())
+    ):
+        return ProviderError(msg, "network", transient=True)
+    return ProviderError(msg, "error")
