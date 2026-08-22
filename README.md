@@ -83,7 +83,8 @@ Three native SDK paths, plus every OpenAI-compatible host through one client:
 | **Kimi** (Moonshot) | `--provider kimi --model kimi-k2-0905-preview` |
 | **GLM** (Zhipu) | `--provider glm --model glm-4.6` |
 | **NVIDIA NIM** | `--provider nvidia` — detected from `nvapi-...` keys |
-| Groq, OpenRouter, Together | `--provider groq` / `openrouter` / `together` |
+| **OpenRouter** | detected from `sk-or-...` keys; `--model anthropic/claude-sonnet-4.5` |
+| Groq, Together | `--provider groq` / `together` |
 | Ollama, LM Studio (local) | `--provider ollama` / `lmstudio` |
 | anything else | `--provider custom --base-url https://your-host/v1` |
 
@@ -94,7 +95,7 @@ semcache --provider ollama --model llama3.1 --embedder local   # fully offline
 ```
 
 `--base-url` overrides any preset, so a corporate gateway or proxy works too.
-Only `xai-`, `nvapi-`, `sk-ant-` and `AIza` prefixes are unambiguous — DeepSeek,
+Only `xai-`, `nvapi-`, `sk-or-`, `sk-ant-` and `AIza` prefixes are unambiguous — DeepSeek,
 Kimi and most compatible hosts also issue `sk-...` keys, so those need
 `--provider`. The provider and model are saved after the first run.
 

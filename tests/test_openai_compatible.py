@@ -110,6 +110,10 @@ def test_provider_name_is_recorded_not_flattened_to_openai(endpoint, tmp_path):
 def test_key_prefixes_that_are_unambiguous():
     assert detect_provider("xai-abc") == "grok"
     assert detect_provider("nvapi-abc") == "nvidia"
+    # Must be checked before the bare "sk-" branch, or an OpenRouter key is
+    # sent to api.openai.com and fails with a confusing auth error.
+    assert detect_provider("sk-or-v1-abc") == "openrouter"
+    assert detect_provider("sk-ant-abc") == "anthropic"
     # DeepSeek and Kimi also issue sk-... keys, so a prefix cannot disambiguate
     # them from OpenAI -- those require an explicit --provider.
     assert detect_provider("sk-abc") == "openai"

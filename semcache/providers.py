@@ -76,6 +76,11 @@ def detect_provider(api_key: str) -> str | None:
     key = (api_key or "").strip()
     if key.startswith("sk-ant-"):
         return "anthropic"
+    # Check the longer, unambiguous "sk-" variants before the bare prefix,
+    # otherwise an OpenRouter key gets sent to api.openai.com and fails with a
+    # confusing auth error.
+    if key.startswith("sk-or-"):
+        return "openrouter"
     if key.startswith(("sk-", "sess-")):
         return "openai"
     if key.startswith("AIza"):
