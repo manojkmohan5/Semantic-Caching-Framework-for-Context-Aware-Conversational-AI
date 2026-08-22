@@ -77,6 +77,19 @@ jobs:
           semcache ask --offline --embedder hash "what is a semantic cache"
           semcache ask --offline --embedder hash "what is a semantic cache" | tee second.txt
           grep -q "from cache" second.txt
+      - name: Project caches are isolated from each other
+        run: |
+          semcache ask --offline --embedder hash --project a "shared question"
+          semcache ask --offline --embedder hash --project b "shared question" | tee b.txt
+          grep -q "asked the model" b.txt
+      - name: Embeddable API works
+        run: |
+          python -c "
+          from semcache import SemCache
+          with SemCache(offline=True, embedder='hash') as sc:
+              assert sc.ask('hello there world').source == 'miss'
+              assert sc.ask('hello there world').from_cache
+          print('api ok')"
 
   bench:
     # The real ONNX embedder, so paraphrase quality is measured for real.
@@ -102,3 +115,31 @@ jobs:
           name: bench-report
           path: bench-report.json
           if-no-files-found: warn
+
+  docker:
+    # The image is where most users will meet this, and it has its own failure
+    # modes (package data missing from the wheel, the baked model masked by the
+    # volume). Building it in CI is the only way those stay caught.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: semcache:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: CLI runs in the container
+        run: docker run --rm semcache:ci --version
+      - name: Benchmark passes with no network and the real embedder
+        # --network none proves the ONNX model really is baked into the image.
+        run: docker run --rm --network none semcache:ci bench --offline --embedder local --assert-targets
+      - name: Cache persists across containers
+        run: |
+          docker volume create semcache-ci
+          docker run --rm -v semcache-ci:/data semcache:ci ask --offline "what is a semantic cache"
+          docker run --rm -v semcache-ci:/data semcache:ci ask --offline "what is a semantic cache" | tee out.txt
+          grep -q "from cache" out.txt
