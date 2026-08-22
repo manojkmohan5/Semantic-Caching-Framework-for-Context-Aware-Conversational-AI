@@ -60,7 +60,12 @@ class Config:
     # --- matching ---
     #: Cosine score required to reuse an answer. High on purpose: a wrong answer
     #: served confidently is far worse than an extra API call.
-    threshold: float = 0.90
+    #:
+    #: 0.95 is measured, not guessed. On data/queries.jsonl with
+    #: bge-small-en-v1.5, 0.90 admitted 6 of 12 trap questions while 0.95 admits
+    #: 1 and still keeps 23 of 24 real paraphrases. Re-run `semcache bench` after
+    #: changing this.
+    threshold: float = 0.95
     #: Lower bar used *only* when the provider is unreachable or rate-limited.
     fallback_threshold: float = 0.75
     top_k: int = 5

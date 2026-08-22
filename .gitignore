@@ -69,3 +69,4 @@ __pycache__/
 
 # Ignore requirements.txt if you want to keep it local
 # requirements.txt
+bench-report.json
