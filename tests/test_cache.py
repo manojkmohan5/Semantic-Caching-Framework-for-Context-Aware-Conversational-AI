@@ -471,3 +471,21 @@ def test_lru_survives_a_coarse_clock(tmp_path, monkeypatch):
     assert look(cache, "frozen clock entry 0")[0] is not None
     assert cache.store.by_hash("frozen clock entry 1") is None
     cache.close()
+
+
+def test_chat_is_the_default_subcommand():
+    """`semcache --threshold 0.9` used to die with "invalid choice: 0.9": the
+    top-level parser does not know the shared flags, so the flag's value was
+    read as the subcommand."""
+    from semcache.cli import with_default_command
+
+    assert with_default_command([]) == ["chat"]
+    assert with_default_command(["--threshold", "0.9"]) == ["chat", "--threshold", "0.9"]
+    assert with_default_command(["--offline"]) == ["chat", "--offline"]
+    # explicit subcommands are left alone, with or without leading flags
+    assert with_default_command(["ask", "hi"]) == ["ask", "hi"]
+    assert with_default_command(["--offline", "ask", "hi"]) == ["--offline", "ask", "hi"]
+    assert with_default_command(["bench"]) == ["bench"]
+    # help and version must reach the top-level parser untouched
+    assert with_default_command(["--help"]) == ["--help"]
+    assert with_default_command(["--version"]) == ["--version"]

@@ -86,6 +86,7 @@ def resolve_key(cfg: Config, cli_key: str | None) -> tuple[str, str]:
 
     if not key:
         out(f"semcache {__version__}  -  no API key found")
+        out("  (the paste stays hidden, so nothing appears as you type)")
         try:
             key = getpass.getpass("Paste your LLM API key (hidden): ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -135,11 +136,27 @@ def _confirm_provider(guess: str | None) -> str:
             return choice
 
 
+#: Shown when asking for a model, so the question is answerable without
+#: leaving the terminal to go and read provider docs.
+_MODEL_EXAMPLES = {
+    "openrouter": "anthropic/claude-sonnet-4.5",
+    "deepseek": "deepseek-chat",
+    "kimi": "kimi-k2-0905-preview",
+    "glm": "glm-4.6",
+    "grok": "grok-4",
+    "nvidia": "meta/llama-3.1-70b-instruct",
+    "groq": "llama-3.3-70b-versatile",
+    "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "ollama": "llama3.1",
+    "lmstudio": "local-model",
+}
+
+
 def choose_model(cfg: Config, provider: str) -> str:
     """Let the user pick, once. Saved to config.json so it is never asked twice."""
     if cfg.model:
         return cfg.model
-    if provider == "stub":
+    if provider == "stub" or cfg.offline:
         return "stub-1"
 
     options = CATALOG.get(provider, [])
@@ -148,16 +165,14 @@ def choose_model(cfg: Config, provider: str) -> str:
             return default_model(provider)
         # These hosts each name their models differently and rename them often.
         # Shipping a guess would 400; ask once and save it to config.json.
+        example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
         if not _interactive():
-            raise SystemExit(
-                f"{provider} needs a model name. Pass --model (e.g. "
-                "deepseek-chat, kimi-k2-0905-preview, glm-4.6)."
-            )
+            raise SystemExit(f"{provider} needs a model name. Pass --model {example}")
         out("")
-        out(f"  Which {provider} model? (see their docs for current names)")
+        out(f"  Which {provider} model? Example: {example}")
         typed = input("  Model: ").strip()
         if not typed:
-            raise SystemExit(f"{provider} needs a model name. Pass --model.")
+            raise SystemExit(f"{provider} needs a model name. Pass --model {example}")
         return typed
     if not _interactive():
         return options[0].id  # nobody to ask; take the documented default
@@ -192,7 +207,7 @@ def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
     if answer in ("", "y", "yes"):
         try:
             cfg.home.mkdir(parents=True, exist_ok=True)
-            cfg.env_path.write_text(f"{KEY_ENV[provider]}={key}\n", encoding="utf-8")
+            cfg.env_path.write_text(f"{_key_var(provider)}={key}\n", encoding="utf-8")
             # No-op on Windows, correct on POSIX.
             with contextlib.suppress(OSError):
                 os.chmod(cfg.env_path, 0o600)
@@ -200,6 +215,16 @@ def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
         except OSError as exc:
             out(f"  Could not save the key ({exc}). It will be asked for next time.")
     _persist_model(cfg, provider, model)
+
+
+def _key_var(provider: str) -> str:
+    """Env var name to save the key under.
+
+    Grok, DeepSeek, OpenRouter and the other OpenAI-compatible hosts have no
+    dedicated variable, so they use the generic one. Indexing KEY_ENV directly
+    raised KeyError for every one of them.
+    """
+    return KEY_ENV.get(provider, "SEMCACHE_API_KEY")
 
 
 def _persist_model(cfg: Config, provider: str, model: str) -> None:
@@ -340,26 +365,29 @@ def _answer(session: ChatSession, prompt: str) -> None:
 # ------------------------------------------------------------------ subcommands
 
 
-def cmd_chat(cfg: Config, args) -> int:
+def setup(cfg: Config, args) -> tuple[str, str, str]:
+    """Resolve key, provider and model once, then remember them.
+
+    Shared by every subcommand. Previously only `chat` persisted the key, so
+    every single `ask` re-prompted for it -- and `ask` exited with "pass
+    --model" instead of just asking, even though `chat` asked.
+    """
     key, provider = resolve_key(cfg, args.api_key)
     model = choose_model(cfg, provider)
     if not cfg.offline:
         offer_to_save(cfg, key, provider, model)
+    return key, provider, model
+
+
+def cmd_chat(cfg: Config, args) -> int:
+    key, provider, model = setup(cfg, args)
     session = build_session(cfg, key, provider, model)
     return run_repl(cfg, session)
 
 
 def cmd_ask(cfg: Config, args) -> int:
-    """One-shot: answer a single prompt and exit. Used by CI's smoke test."""
-    key, provider = resolve_key(cfg, args.api_key)
-    if provider == "stub":
-        model = cfg.model or "stub-1"
-    elif cfg.model:
-        model = cfg.model
-    elif needs_explicit_model(provider):
-        raise SystemExit(f"{provider} needs a model name. Pass --model.")
-    else:
-        model = default_model(provider)
+    """One-shot: answer a single prompt and exit."""
+    key, provider, model = setup(cfg, args)
     session = build_session(cfg, key, provider, model)
     turn = session.ask(args.prompt)
     out(turn.text.strip())
@@ -503,15 +531,32 @@ _CONFIG_KEYS = (
 )
 
 
+SUBCOMMANDS = ("chat", "ask", "stats", "clear", "bench")
+_PASSTHROUGH = ("-h", "--help", "--version")
+
+
+def with_default_command(argv: list[str]) -> list[str]:
+    """Make `chat` the default subcommand.
+
+    Injecting it *before* parsing matters: the top-level parser does not know
+    the shared flags, so `semcache --threshold 0.90` made argparse read "0.90"
+    as the subcommand and fail outright. Reparsing afterwards was too late.
+    """
+    for token in argv:
+        if token in _PASSTHROUGH:
+            return argv
+        if not token.startswith("-"):
+            # First bare word decides: a known subcommand, or an argument that
+            # belongs to an implicit `chat`.
+            return argv if token in SUBCOMMANDS else ["chat", *argv]
+    return ["chat", *argv]  # nothing but flags, or nothing at all
+
+
 def main(argv: list[str] | None = None) -> int:
     _setup_console()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(with_default_command(list(argv if argv is not None else sys.argv[1:])))
     command = args.command or "chat"
-    if args.command is None:
-        # Bare `semcache` means chat, but argparse has not parsed the shared
-        # flags in that case -- reparse so `semcache --offline` still works.
-        args = parser.parse_args(["chat", *(argv if argv is not None else sys.argv[1:])])
 
     cfg = Config.load(**{k: getattr(args, k, None) for k in _CONFIG_KEYS})
     try:

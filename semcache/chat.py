@@ -183,7 +183,9 @@ class ChatSession:
 
         note = ""
         if rec.best_below:
-            note = f"closest saved answer was only {rec.best_below * 100:.0f}% match"
+            # One decimal here on purpose: rounding 0.896 to "90%" next to a
+            # 0.90 threshold made the message contradict the outcome.
+            note = f"closest saved answer was only {rec.best_below * 100:.1f}% match"
 
         # A truncated answer must never be cached -- it would be served forever.
         if result is not None and result.truncated:
@@ -221,7 +223,7 @@ class ChatSession:
             rec.total_ms = (time.perf_counter() - started) * 1000
             self._remember(rec.prompt, degraded.response)
             note = (
-                f"{degraded.similarity * 100:.0f}% match · "
+                f"{degraded.similarity * 100:.1f}% match · "
                 f"{exc.user_message}, so this is the closest saved answer"
             )
             return Turn("degraded", degraded.response, self.metrics.record(rec), note)
