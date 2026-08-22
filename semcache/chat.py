@@ -5,11 +5,13 @@ This is the whole product. Everything else in the package serves this file.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Callable, Iterator
+from typing import Callable
 
 from .cache import SemanticCache
 from .metrics import Metrics, Record, estimate_cost
@@ -54,8 +56,15 @@ class Turn:
 class ChatSession:
     """Owns the cache, the provider and the conversation history for one session."""
 
-    def __init__(self, cfg, provider, embedder, cache: SemanticCache, metrics: Metrics,
-                 session_id: str = "default"):
+    def __init__(
+        self,
+        cfg,
+        provider,
+        embedder,
+        cache: SemanticCache,
+        metrics: Metrics,
+        session_id: str = "default",
+    ):
         self.cfg = cfg
         self.provider = provider
         self.embedder = embedder
@@ -71,10 +80,9 @@ class ChatSession:
         one-time cost never shows up as latency on a real question."""
 
         def _warm():
-            try:
+            # A failed warm-up just means the first encode pays the load cost.
+            with contextlib.suppress(Exception):
                 self.embedder.warm()
-            except Exception:
-                pass  # a failed warm-up just means the first encode pays for it
 
         self._warm_thread = threading.Thread(target=_warm, daemon=True)
         self._warm_thread.start()
@@ -83,7 +91,7 @@ class ChatSession:
     def _embed_text(self, prompt: str) -> str:
         if not self.cfg.context_turns or not needs_context(prompt) or not self.history:
             return prompt
-        recent = [t["content"] for t in self.history[-(self.cfg.context_turns * 2):]]
+        recent = [t["content"] for t in self.history[-(self.cfg.context_turns * 2) :]]
         return " ".join([*recent, prompt]).strip()
 
     # ----------------------------------------------------------------- the flow
@@ -134,17 +142,16 @@ class ChatSession:
         rec.prompt_tokens = hit.entry.prompt_tokens
         rec.response_tokens = hit.entry.response_tokens
         # What we did not pay for is exactly what the original call cost.
-        rec.cost_saved_usd = estimate_cost(
-            info, hit.entry.prompt_tokens, hit.entry.response_tokens
-        )
+        rec.cost_saved_usd = estimate_cost(info, hit.entry.prompt_tokens, hit.entry.response_tokens)
         rec.total_ms = (time.perf_counter() - started) * 1000
         self._remember(rec.prompt, text)
         note = ""
         if hit.similarity is not None:
             note = f"{hit.similarity * 100:.0f}% match"
         if hit.entry.model and hit.entry.model != self.provider.model:
-            note += f" (answered by {hit.entry.model})" if note else \
-                    f"answered by {hit.entry.model}"
+            note += (
+                f" (answered by {hit.entry.model})" if note else f"answered by {hit.entry.model}"
+            )
         return Turn(hit.kind, text, self.metrics.record(rec), note)
 
     # ------------------------------------------------------------- model branch

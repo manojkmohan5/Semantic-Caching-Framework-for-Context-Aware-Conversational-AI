@@ -129,9 +129,7 @@ class Store:
         return _row(row) if row else None
 
     def count(self) -> int:
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM entries WHERE namespace=?", (self.namespace,)
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM entries WHERE namespace=?", (self.namespace,))
         return int(cur.fetchone()[0])
 
     def all_vectors(self, dim: int) -> tuple[list[int], np.ndarray]:
@@ -230,9 +228,7 @@ class Store:
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
-        cur = self.db.execute(
-            f"DELETE FROM entries WHERE id IN ({marks})", tuple(ids)
-        )
+        cur = self.db.execute(f"DELETE FROM entries WHERE id IN ({marks})", tuple(ids))
         self.db.commit()
         return cur.rowcount or 0
 

@@ -115,9 +115,7 @@ class Aggregate:
                 agg.provider_ok += 1
             elif r.outcome == "error":
                 agg.provider_fail += 1
-                agg.error_kinds[r.error or "error"] = (
-                    agg.error_kinds.get(r.error or "error", 0) + 1
-                )
+                agg.error_kinds[r.error or "error"] = agg.error_kinds.get(r.error or "error", 0) + 1
             elif r.outcome == "degraded":
                 # A degraded answer means the provider was tried and failed.
                 agg.provider_fail += 1
@@ -271,9 +269,7 @@ def render_plain(agg: Aggregate, cache_stats: dict | None = None) -> str:
                 f" slowest {_ms(max(agg.miss_latencies))})"
             )
         if agg.speedup > 1:
-            lines.append(
-                f"  cache answers came back about {agg.speedup:.0f}x faster"
-            )
+            lines.append(f"  cache answers came back about {agg.speedup:.0f}x faster")
 
     lines += [
         "",
@@ -318,8 +314,7 @@ def render_plain(agg: Aggregate, cache_stats: dict | None = None) -> str:
         )
         if cache_stats.get("evicted"):
             lines.append(
-                f"  {cache_stats['evicted']} old answers dropped to make room,"
-                " least-used first"
+                f"  {cache_stats['evicted']} old answers dropped to make room, least-used first"
             )
         top = cache_stats.get("top_reused") or []
         for i, (prompt, count) in enumerate(top):
@@ -337,8 +332,7 @@ def render_detail(agg: Aggregate, title: str = "detail") -> str:
         "",
         f"{title}",
         f"  requests                 {agg.total}",
-        f"  from cache               {agg.hits}  "
-        f"(exact {agg.exact}, semantic {agg.semantic})",
+        f"  from cache               {agg.hits}  (exact {agg.exact}, semantic {agg.semantic})",
         f"  asked the model          {agg.misses}",
         f"  degraded / errors        {agg.degraded} / {agg.errors}",
         f"  hit rate                 {agg.hit_rate * 100:.1f}%",
@@ -360,8 +354,7 @@ def render_detail(agg: Aggregate, title: str = "detail") -> str:
     ]
     if agg.cost_total > 0:
         lines.append(
-            f"  cost spent / saved       {_money(agg.cost_spent)}"
-            f" / {_money(agg.cost_saved)}"
+            f"  cost spent / saved       {_money(agg.cost_spent)} / {_money(agg.cost_saved)}"
         )
     lines.append("")
     return "\n".join(lines)

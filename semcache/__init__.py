@@ -23,8 +23,18 @@ __all__ = ["SemCache", "Answer", "__version__"]
 class Answer:
     """The result of one `ask`, with enough detail to log or display."""
 
-    __slots__ = ("text", "source", "similarity", "latency_ms", "input_tokens",
-                 "output_tokens", "cost_usd", "cost_saved_usd", "model", "note")
+    __slots__ = (
+        "text",
+        "source",
+        "similarity",
+        "latency_ms",
+        "input_tokens",
+        "output_tokens",
+        "cost_usd",
+        "cost_saved_usd",
+        "model",
+        "note",
+    )
 
     def __init__(self, turn):
         rec = turn.record
@@ -85,21 +95,24 @@ class SemCache:
         from .metrics import Metrics
         from .providers import build_provider, default_model, detect_provider
 
-        cfg = Config.load(project=project, offline=offline or None, model=model,
-                          provider=provider, **options)
+        cfg = Config.load(
+            project=project, offline=offline or None, model=model, provider=provider, **options
+        )
 
         key = api_key or ""
         if not key and not cfg.offline:
-            for var in ("SEMCACHE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
-                        "GEMINI_API_KEY"):
+            for var in (
+                "SEMCACHE_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "GEMINI_API_KEY",
+            ):
                 key = os.environ.get(var) or ""
                 if key:
                     break
 
         name = cfg.provider or provider or detect_provider(key) or "stub"
-        chosen = cfg.model or model or (
-            "stub-1" if name == "stub" else default_model(name)
-        )
+        chosen = cfg.model or model or ("stub-1" if name == "stub" else default_model(name))
 
         self.config = cfg
         self._provider = build_provider(name, key, chosen, cfg)

@@ -16,6 +16,7 @@ from .embedders import build_embedder
 from .metrics import Aggregate, Metrics, percentile, render_detail
 from .providers import build_provider
 
+
 def default_queries() -> Path:
     """The bundled query set, found whether running from a checkout or an
     installed wheel. Walking up from __file__ lands in site-packages once
@@ -24,6 +25,7 @@ def default_queries() -> Path:
     if packaged.exists():
         return packaged
     return Path(__file__).resolve().parent.parent / "data" / "queries.jsonl"
+
 
 #: Asserted with --assert-targets. Measured on the dev machine, not aspirational:
 #: a semantic hit is dominated by the cost of embedding the query, which differs
@@ -108,7 +110,9 @@ def run_bench(cfg, args) -> int:
         embedder = build_embedder(bench_cfg, provider)
 
         prompts_total = sum(
-            1 + len(g.get("paraphrases", [])) + len(g.get("traps", []))
+            1
+            + len(g.get("paraphrases", []))
+            + len(g.get("traps", []))
             + len(g.get("hard_traps", []))
             for g in groups
         )
@@ -146,9 +150,7 @@ def run_bench(cfg, args) -> int:
         entries = reopened.store.count()
         reopened.close()
 
-    exact_ms = percentile(
-        [r.total_ms for r in warm_records if r.outcome == "exact"], 50
-    )
+    exact_ms = percentile([r.total_ms for r in warm_records if r.outcome == "exact"], 50)
     hit_ms = percentile(
         [r.total_ms for r in warm_records if r.outcome in ("exact", "semantic")], 50
     )
@@ -167,8 +169,7 @@ def run_bench(cfg, args) -> int:
     # separate them -- gating on it would assert the impossible. Its job is to
     # exercise cache mechanics offline, not semantic quality.
     if embedder_name != "hash":
-        checks.insert(0, ("no false hits on trap questions",
-                          cold_traps + warm_traps, 0, "=="))
+        checks.insert(0, ("no false hits on trap questions", cold_traps + warm_traps, 0, "=="))
     print("targets")
     failures = 0
     for label, actual, target, op in checks:
@@ -255,9 +256,21 @@ def _print_table(cold: Aggregate, warm: Aggregate) -> None:
     print(row("answered from cache", cold.hits, warm.hits))
     print(row("hit rate", f"{cold.hit_rate * 100:.1f}%", f"{warm.hit_rate * 100:.1f}%"))
     print(row("model calls", cold.misses, warm.misses))
-    print(row("typical response", f"{percentile(all_cold, 50):.1f}",
-              f"{percentile(all_warm, 50):.1f}", " ms"))
-    print(row("slowest 1 in 20", f"{percentile(all_cold, 95):.1f}",
-              f"{percentile(all_warm, 95):.1f}", " ms"))
+    print(
+        row(
+            "typical response",
+            f"{percentile(all_cold, 50):.1f}",
+            f"{percentile(all_warm, 50):.1f}",
+            " ms",
+        )
+    )
+    print(
+        row(
+            "slowest 1 in 20",
+            f"{percentile(all_cold, 95):.1f}",
+            f"{percentile(all_warm, 95):.1f}",
+            " ms",
+        )
+    )
     print(row("average", f"{mean_cold:.1f}", f"{mean_warm:.1f}", " ms"))
     print(f"  {'average change':<22} {'':>9} {change:>9}")

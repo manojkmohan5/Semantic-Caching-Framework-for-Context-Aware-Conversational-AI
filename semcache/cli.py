@@ -8,6 +8,7 @@ and no jargon anywhere in the chat flow.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import getpass
 import os
 import sys
@@ -38,10 +39,8 @@ def _setup_console() -> None:
     """A default Windows console is cp1252: one non-ASCII character in a model
     response would raise UnicodeEncodeError and kill the REPL."""
     for stream in (sys.stdout, sys.stderr):
-        try:
+        with contextlib.suppress(AttributeError, ValueError):
             stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):  # pragma: no cover
-            pass
 
 
 def out(text: str = "") -> None:
@@ -135,9 +134,11 @@ def choose_model(cfg: Config, provider: str) -> str:
         default = "  (default)" if i == 1 else ""
         out(f"    {i}) {info.id:<20} {price:<26} {info.blurb}{default}")
     choice = input(f"  Model [1-{len(options)}, Enter for 1]: ").strip()
-    picked = options[int(choice) - 1] if choice.isdigit() and 1 <= int(choice) <= len(
-        options
-    ) else options[0]
+    picked = (
+        options[int(choice) - 1]
+        if choice.isdigit() and 1 <= int(choice) <= len(options)
+        else options[0]
+    )
     return picked.id
 
 
@@ -150,10 +151,9 @@ def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
         try:
             cfg.home.mkdir(parents=True, exist_ok=True)
             cfg.env_path.write_text(f"{KEY_ENV[provider]}={key}\n", encoding="utf-8")
-            try:
-                os.chmod(cfg.env_path, 0o600)  # no-op on Windows, correct on POSIX
-            except OSError:
-                pass
+            # No-op on Windows, correct on POSIX.
+            with contextlib.suppress(OSError):
+                os.chmod(cfg.env_path, 0o600)
             out("  Saved. You won't be asked again.")
         except OSError as exc:
             out(f"  Could not save the key ({exc}). It will be asked for next time.")
@@ -378,10 +378,19 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     common.add_argument("--home", help="cache directory (default ~/.semcache)")
     common.add_argument("--project", help="isolate this project's cache from others")
-    common.add_argument("--offline", action="store_true", default=None,
-                        help="use the built-in stub model: no key, no network, no cost")
-    common.add_argument("--no-log-prompts", action="store_false", dest="log_prompts",
-                        default=None, help="record only hashes, not prompt text")
+    common.add_argument(
+        "--offline",
+        action="store_true",
+        default=None,
+        help="use the built-in stub model: no key, no network, no cost",
+    )
+    common.add_argument(
+        "--no-log-prompts",
+        action="store_false",
+        dest="log_prompts",
+        default=None,
+        help="record only hashes, not prompt text",
+    )
     common.add_argument("--debug", action="store_true", default=None)
 
     subs = parser.add_subparsers(dest="command")
@@ -399,8 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     bench = subs.add_parser("bench", parents=[common], help="replay a query set")
     bench.add_argument("--queries", help="path to a JSONL query set")
-    bench.add_argument("--assert-targets", action="store_true",
-                       help="exit non-zero if a latency target or trap pair regresses")
+    bench.add_argument(
+        "--assert-targets",
+        action="store_true",
+        help="exit non-zero if a latency target or trap pair regresses",
+    )
     bench.add_argument("--report", default="bench-report.json")
 
     return parser
@@ -415,8 +427,19 @@ _HANDLERS = {
 }
 
 _CONFIG_KEYS = (
-    "provider", "model", "embedder", "threshold", "max_entries", "ttl_seconds",
-    "scope", "effort", "home", "project", "offline", "log_prompts", "debug",
+    "provider",
+    "model",
+    "embedder",
+    "threshold",
+    "max_entries",
+    "ttl_seconds",
+    "scope",
+    "effort",
+    "home",
+    "project",
+    "offline",
+    "log_prompts",
+    "debug",
 )
 
 

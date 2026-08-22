@@ -6,6 +6,7 @@ one and existing entries land in a fresh namespace instead of being misread.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -200,10 +201,9 @@ def _from_env() -> dict:
         raw = os.environ.get(f"{ENV_PREFIX}{name.upper()}")
         if raw is None:
             continue
-        try:
+        # An unparseable env var falls back to the default rather than crashing.
+        with contextlib.suppress(ValueError):
             found[name] = _COERCE.get(name, str)(raw)
-        except ValueError:
-            pass  # an unparseable env var falls back to the default rather than crashing
     return found
 
 

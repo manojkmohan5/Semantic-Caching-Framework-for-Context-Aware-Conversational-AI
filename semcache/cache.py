@@ -39,9 +39,7 @@ class SemanticCache:
         self.namespace = embedder.namespace
         cfg.ensure_dirs()
         self.store = Store(cfg.db_path, self.namespace)
-        self.index = VectorIndex(
-            embedder.dim, cfg.index_dir / f"{self.namespace}.faiss"
-        )
+        self.index = VectorIndex(embedder.dim, cfg.index_dir / f"{self.namespace}.faiss")
         self._lock = threading.Lock()
         self.evicted = 0
         self._repair_drift()

@@ -9,8 +9,8 @@ it only configures them and maps their exceptions onto one error type.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 # ---------------------------------------------------------------- model catalog
 
@@ -279,8 +279,10 @@ class GeminiProvider(Provider):
     def stream_chat(self, prompt: str, history: list[dict]) -> Iterator[str]:
         client = self._client()
         contents = [
-            {"role": "model" if m["role"] == "assistant" else "user",
-             "parts": [{"text": m["content"]}]}
+            {
+                "role": "model" if m["role"] == "assistant" else "user",
+                "parts": [{"text": m["content"]}],
+            }
             for m in self._messages(prompt, history)
         ]
         chunks: list[str] = []
@@ -317,9 +319,7 @@ class GeminiProvider(Provider):
     def embed(self, texts: list[str]) -> list[list[float]]:
         client = self._client()
         try:
-            resp = client.models.embed_content(
-                model=EMBEDDING_MODELS["gemini"][0], contents=texts
-            )
+            resp = client.models.embed_content(model=EMBEDDING_MODELS["gemini"][0], contents=texts)
         except Exception as exc:
             raise _map_gemini(self._errors, exc) from exc
         return [list(e.values) for e in resp.embeddings]

@@ -293,14 +293,35 @@ def test_percentile_matches_hand_computed_values():
 
 def test_aggregate_counts_and_savings(tmp_path):
     records = [
-        Record(outcome="miss", total_ms=2000, llm_ms=1990, cost_usd=0.01,
-               prompt_tokens=10, response_tokens=100, provider="stub", model="m"),
-        Record(outcome="semantic", total_ms=5, cost_saved_usd=0.01,
-               prompt_tokens=10, response_tokens=100, provider="stub", model="m"),
-        Record(outcome="exact", total_ms=1, cost_saved_usd=0.01,
-               prompt_tokens=10, response_tokens=100, provider="stub", model="m"),
-        Record(outcome="error", total_ms=50, provider="stub", model="m",
-               error="rate_limit"),
+        Record(
+            outcome="miss",
+            total_ms=2000,
+            llm_ms=1990,
+            cost_usd=0.01,
+            prompt_tokens=10,
+            response_tokens=100,
+            provider="stub",
+            model="m",
+        ),
+        Record(
+            outcome="semantic",
+            total_ms=5,
+            cost_saved_usd=0.01,
+            prompt_tokens=10,
+            response_tokens=100,
+            provider="stub",
+            model="m",
+        ),
+        Record(
+            outcome="exact",
+            total_ms=1,
+            cost_saved_usd=0.01,
+            prompt_tokens=10,
+            response_tokens=100,
+            provider="stub",
+            model="m",
+        ),
+        Record(outcome="error", total_ms=50, provider="stub", model="m", error="rate_limit"),
     ]
     agg = Aggregate.of(records)
     assert agg.total == 4
