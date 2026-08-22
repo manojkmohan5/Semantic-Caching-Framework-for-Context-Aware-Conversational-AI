@@ -347,7 +347,8 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
     lifetime = Aggregate.of(session.metrics.load_all())
 
     model = st.strong(session.provider.model)
-    entries = st.hit(f"{stats['entries']} answers") if stats["entries"] else st.faint("empty")
+    n = stats["entries"]
+    entries = st.hit(f"{n} answer{'' if n == 1 else 's'}") if n else st.faint("empty")
     saved = (
         st.hit(f"${lifetime.cost_saved:.4f} saved")
         if lifetime.cost_saved
@@ -376,7 +377,10 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
                 st.hit(f"{lifetime.hit_rate * 100:.0f}% hit rate")
                 if lifetime.total
                 else st.faint("no history yet"),
-                st.faint(f"{lifetime.calls_avoided} calls avoided"),
+                st.faint(
+                    f"{lifetime.calls_avoided} call"
+                    f"{'' if lifetime.calls_avoided == 1 else 's'} avoided"
+                ),
                 saved,
             ],
         ),
