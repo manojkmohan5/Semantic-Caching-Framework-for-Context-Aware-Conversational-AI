@@ -33,6 +33,11 @@ semcache = "semcache.cli:main"
 [tool.setuptools.packages.find]
 include = ["semcache*"]
 
+# The benchmark query set ships with the package: once installed, walking up from
+# __file__ lands in site-packages, so it cannot be found outside the wheel.
+[tool.setuptools.package-data]
+semcache = ["data/*.jsonl"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

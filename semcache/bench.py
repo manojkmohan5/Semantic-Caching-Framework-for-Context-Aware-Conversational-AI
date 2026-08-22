@@ -16,7 +16,14 @@ from .embedders import build_embedder
 from .metrics import Aggregate, Metrics, percentile, render_detail
 from .providers import build_provider
 
-DEFAULT_QUERIES = Path(__file__).resolve().parent.parent / "data" / "queries.jsonl"
+def default_queries() -> Path:
+    """The bundled query set, found whether running from a checkout or an
+    installed wheel. Walking up from __file__ lands in site-packages once
+    installed, so the file has to travel with the package."""
+    packaged = Path(__file__).resolve().parent / "data" / "queries.jsonl"
+    if packaged.exists():
+        return packaged
+    return Path(__file__).resolve().parent.parent / "data" / "queries.jsonl"
 
 #: Asserted with --assert-targets. Measured on the dev machine, not aspirational:
 #: a semantic hit is dominated by the cost of embedding the query, which differs
@@ -75,7 +82,7 @@ def _pass(session: ChatSession, groups: list[dict]) -> tuple[list, int, int]:
 
 
 def run_bench(cfg, args) -> int:
-    queries_path = Path(args.queries) if args.queries else DEFAULT_QUERIES
+    queries_path = Path(args.queries) if args.queries else default_queries()
     if not queries_path.exists():
         print(f"  no query set at {queries_path}")
         return 1

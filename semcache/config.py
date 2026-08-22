@@ -97,6 +97,14 @@ class Config:
     max_retries: int = 2
 
     # --- misc ---
+    #: Isolates one project's cache from another. Unset (the default) means all
+    #: projects share one cache, which is where the savings are largest -- opt
+    #: into isolation only when answers should not cross project boundaries.
+    project: str | None = None
+    #: Where the ONNX model is cached. Separate from `home` so a container can
+    #: bake the model into the image outside the mounted cache volume, which
+    #: would otherwise mask it.
+    model_cache_dir: str | None = None
     log_prompts: bool = True
     offline: bool = False
     debug: bool = False
@@ -116,6 +124,8 @@ class Config:
 
     @property
     def models_dir(self) -> Path:
+        if self.model_cache_dir:
+            return Path(self.model_cache_dir).expanduser()
         return self.home / "models"
 
     @property
@@ -139,6 +149,19 @@ class Config:
         cfg = _overlay(cfg, _from_file(cfg.config_path))
         cfg = _overlay(cfg, _from_env())
         cfg = _overlay(cfg, {k: v for k, v in overrides.items() if v is not None})
+
+        if cfg.project:
+            # Scope the whole cache -- db, index and metrics -- under the project,
+            # then re-read that project's own config so a model saved there sticks.
+            # `home` is deliberately excluded from these re-overlays: re-applying
+            # it would undo the scoping we just did.
+            cfg = replace(cfg, home=cfg.home / "projects" / slug(cfg.project))
+            cfg = _overlay(cfg, _drop_home(_from_file(cfg.config_path)))
+            cfg = _overlay(cfg, _drop_home(_from_env()))
+            cfg = _overlay(
+                cfg,
+                _drop_home({k: v for k, v in overrides.items() if v is not None}),
+            )
         return cfg
 
     def as_dict(self) -> dict:
@@ -147,6 +170,16 @@ class Config:
             value = getattr(self, f.name)
             out[f.name] = str(value) if isinstance(value, Path) else value
         return out
+
+
+def _drop_home(values: dict) -> dict:
+    return {k: v for k, v in values.items() if k != "home"}
+
+
+def slug(name: str) -> str:
+    """Filesystem-safe project name."""
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name.strip())
+    return cleaned.strip("-").lower() or "default"
 
 
 def _from_file(path: Path) -> dict:

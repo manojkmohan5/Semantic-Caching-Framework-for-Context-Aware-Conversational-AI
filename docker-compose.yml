@@ -1,0 +1,30 @@
+# Run semcache in a container with a persistent cache.
+#
+#   docker compose run --rm semcache                      interactive REPL
+#   docker compose run --rm semcache bench --offline      no key needed
+#   docker compose run --rm semcache stats
+#
+# The named volume is what makes the cache worth having: it survives container
+# restarts, so yesterday's answers still hit today.
+services:
+  semcache:
+    build:
+      context: .
+      args:
+        PREFETCH_MODEL: "1"
+    image: semcache:latest
+    # stdin_open + tty are required for the REPL and the hidden key prompt.
+    stdin_open: true
+    tty: true
+    environment:
+      # Supply whichever one you have; semcache detects the provider from it.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Isolate one project's answers from another; unset means a shared cache.
+      SEMCACHE_PROJECT: ${SEMCACHE_PROJECT:-}
+    volumes:
+      - semcache-data:/data
+
+volumes:
+  semcache-data:

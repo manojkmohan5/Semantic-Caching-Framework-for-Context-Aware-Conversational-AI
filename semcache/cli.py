@@ -377,6 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--scope", choices=["global", "session"])
     common.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     common.add_argument("--home", help="cache directory (default ~/.semcache)")
+    common.add_argument("--project", help="isolate this project's cache from others")
     common.add_argument("--offline", action="store_true", default=None,
                         help="use the built-in stub model: no key, no network, no cost")
     common.add_argument("--no-log-prompts", action="store_false", dest="log_prompts",
@@ -415,7 +416,7 @@ _HANDLERS = {
 
 _CONFIG_KEYS = (
     "provider", "model", "embedder", "threshold", "max_entries", "ttl_seconds",
-    "scope", "effort", "home", "offline", "log_prompts", "debug",
+    "scope", "effort", "home", "project", "offline", "log_prompts", "debug",
 )
 
 
