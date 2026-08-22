@@ -5,6 +5,8 @@ Everything here uses HashEmbedder + StubProvider, so it runs anywhere CI runs.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -362,3 +364,86 @@ def test_schema_version_mismatch_is_a_clear_error(tmp_path):
     store.close()
     with pytest.raises(RuntimeError, match="schema"):
         Store(tmp_path / "c.db", "ns")
+
+
+# ------------------------------------------------------- concurrency regression
+
+
+def test_index_temp_file_is_private_to_this_process(tmp_path):
+    """Two processes sharing one ".tmp" path clobbered each other's write, which
+    failed the request on Windows. The pid keeps them apart."""
+    from semcache.index import VectorIndex
+
+    index = VectorIndex(4, tmp_path / "n.faiss")
+    index.add([1], np.eye(4, dtype="float32")[0])
+    index.save(force=True)
+    assert str(os.getpid()) in str(index.path.with_suffix(f"{index.path.suffix}.{os.getpid()}.tmp"))
+    # The real temp file must not survive a successful save.
+    assert not list(tmp_path.glob("*.tmp"))
+    assert index.path.exists()
+
+
+def test_failed_index_flush_is_not_fatal(tmp_path, monkeypatch):
+    """SQLite holds the vectors, so a lost flush is not lost data. A user's
+    question must never fail because a cache file could not be written."""
+    from semcache import index as index_mod
+
+    index = index_mod.VectorIndex(4, tmp_path / "n.faiss")
+    index.add([1], np.eye(4, dtype="float32")[0])
+
+    def boom(*_a, **_k):
+        raise PermissionError("held by another process")
+
+    monkeypatch.setattr(index_mod.os, "replace", boom)
+    assert index.save(force=True) is False  # reported, not raised
+    assert len(index) == 1  # in-memory state is untouched
+
+
+def test_index_rebuilds_after_a_corrupt_file(tmp_path):
+    from semcache.index import VectorIndex
+
+    path = tmp_path / "n.faiss"
+    index = VectorIndex(4, path)
+    index.add([1, 2], np.eye(4, dtype="float32")[:2])
+    index.save(force=True)
+    path.write_bytes(b"not a faiss index")
+
+    reopened = VectorIndex(4, path)
+    assert len(reopened) == 0, "a corrupt file must be discarded, not misread"
+
+
+# ------------------------------------------------------ non-interactive startup
+
+
+def test_explicit_provider_is_not_re_confirmed(tmp_path, monkeypatch):
+    """An explicit --provider is already the answer. Re-asking made scripting
+    impossible and re-prompted every returning user."""
+    from semcache import cli
+
+    def no_input(*_a, **_k):
+        raise AssertionError("must not prompt when the provider is explicit")
+
+    monkeypatch.setattr("builtins.input", no_input)
+    cfg = Config.load(home=tmp_path, provider="anthropic")
+    key, provider = cli.resolve_key(cfg, "sk-ant-whatever")
+    assert provider == "anthropic"
+    assert key == "sk-ant-whatever"
+
+
+def test_no_tty_never_prompts(tmp_path, monkeypatch):
+    from semcache import cli
+
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("prompted"))
+    monkeypatch.setattr(cli, "_interactive", lambda: False)
+    cfg = Config.load(home=tmp_path)
+    _key, provider = cli.resolve_key(cfg, "sk-ant-abc")
+    assert provider == "anthropic"  # taken from the key shape, unattended
+    # and the model picker falls back to the documented default
+    assert cli.choose_model(cfg, "anthropic") == "claude-sonnet-5"
+
+
+def test_offline_needs_no_key_at_all(tmp_path):
+    from semcache import cli
+
+    key, provider = cli.resolve_key(Config.load(home=tmp_path, offline=True), None)
+    assert (key, provider) == ("", "stub")
