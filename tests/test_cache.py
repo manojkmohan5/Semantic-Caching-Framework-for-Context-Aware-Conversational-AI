@@ -651,3 +651,34 @@ def test_history_sent_to_the_model_is_bounded(tmp_path):
     assert bare._sendable_history() == [], "history_turns=0 sends nothing"
     cache.close()
     none_sent.close()
+
+
+def test_every_config_flag_actually_reaches_config():
+    """_CONFIG_KEYS used to be hand-written, and silently dropped any flag nobody
+    remembered to add: --base-url, --embed-model, --history-turns and
+    --alias-hits were all parsed and then thrown away. It is derived from the
+    dataclass now, and this pins that."""
+    from dataclasses import fields as dc_fields
+
+    from semcache.cli import _CONFIG_KEYS, build_parser
+
+    assert set(_CONFIG_KEYS) == {f.name for f in dc_fields(Config)}
+
+    cases = [
+        (
+            ["chat", "--embed-model", "BAAI/bge-small-en-v1.5"],
+            "embed_model",
+            "BAAI/bge-small-en-v1.5",
+        ),
+        (["chat", "--base-url", "https://gateway/v1"], "base_url", "https://gateway/v1"),
+        (["chat", "--history-turns", "0"], "history_turns", 0),
+        (["chat", "--no-alias-hits"], "alias_hits", False),
+        (["chat", "--threshold", "0.8"], "threshold", 0.8),
+        (["chat", "--model", "grok-4"], "model", "grok-4"),
+        (["chat", "--max-entries", "7"], "max_entries", 7),
+        (["chat", "--scope", "session"], "scope", "session"),
+    ]
+    for argv, field, expected in cases:
+        args = build_parser().parse_args(argv)
+        cfg = Config.load(**{k: getattr(args, k, None) for k in _CONFIG_KEYS})
+        assert getattr(cfg, field) == expected, f"{argv[1]} did not reach {field}"

@@ -13,6 +13,7 @@ import getpass
 import os
 import sys
 import time
+from dataclasses import fields
 
 from . import __version__
 from .cache import SemanticCache
@@ -603,6 +604,19 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--threshold", type=float, help="cosine score needed to reuse (0.90)")
     common.add_argument("--max-entries", type=int, dest="max_entries")
     common.add_argument("--ttl-seconds", type=float, dest="ttl_seconds")
+    common.add_argument(
+        "--history-turns",
+        type=int,
+        dest="history_turns",
+        help="prior exchanges sent to the model on a miss (default 1; 0 is cheapest)",
+    )
+    common.add_argument(
+        "--no-alias-hits",
+        action="store_false",
+        dest="alias_hits",
+        default=None,
+        help="do not store the new wording of a paraphrase that hit",
+    )
     common.add_argument("--scope", choices=["global", "session"])
     common.add_argument("--effort", choices=["low", "medium", "high", "xhigh", "max"])
     common.add_argument("--home", help="cache directory (default ~/.semcache)")
@@ -655,21 +669,11 @@ _HANDLERS = {
     "bench": cmd_bench,
 }
 
-_CONFIG_KEYS = (
-    "provider",
-    "model",
-    "embedder",
-    "threshold",
-    "max_entries",
-    "ttl_seconds",
-    "scope",
-    "effort",
-    "home",
-    "project",
-    "offline",
-    "log_prompts",
-    "debug",
-)
+#: Derived from Config rather than hand-listed. A hand-written list silently
+#: dropped every flag someone forgot to add to it -- --base-url, --embed-model,
+#: --history-turns and --alias-hits were all parsed and then discarded, which is
+#: the worst kind of bug: the flag appears to work and does nothing.
+_CONFIG_KEYS = tuple(f.name for f in fields(Config))
 
 
 SUBCOMMANDS = ("chat", "ask", "stats", "clear", "bench")
