@@ -817,14 +817,42 @@ def test_empty_cache_reports_answers_held_under_another_embedder(tmp_path):
     second.close()
 
 
-def test_auto_embedder_honours_the_configured_model(tmp_path):
-    """The "auto" branch ignored embed_model and always built the default, so a
+def test_local_embedder_honours_the_configured_model(tmp_path):
+    """build_embedder ignored embed_model and always built the default, so a
     configured embedder was silently wrong -- and the cache under the intended
-    one looked empty."""
+    one looked empty.
+
+    Asserted through LocalEmbedder rather than build_embedder, because
+    build_embedder's "auto" path legitimately falls back to the hash embedder
+    when fastembed is not installed. Constructing LocalEmbedder does not import
+    fastembed (the load is lazy), so this runs with or without the extra.
+    """
+    from semcache.embedders import LocalEmbedder, _model_of
+
+    cfg = Config.load(home=tmp_path, embedder="local", embed_model="BAAI/bge-small-en-v1.5")
+    assert _model_of(cfg) == "BAAI/bge-small-en-v1.5"
+    assert LocalEmbedder(_model_of(cfg)).id == "local:BAAI/bge-small-en-v1.5"
+
+    # And the default is the measured one, not whatever a call site hardcodes.
+    default = Config.load(home=tmp_path)
+    assert _model_of(default) == "sentence-transformers/all-MiniLM-L6-v2"
+    assert LocalEmbedder(_model_of(default)).id.endswith("all-MiniLM-L6-v2")
+
+
+def _has_fastembed() -> bool:
+    """Whether the [local] extra is installed. Never raises: an exploding
+    skip condition breaks collection for the whole module."""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("fastembed") is not None
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_fastembed(), reason="needs the [local] extra")
+def test_auto_embedder_picks_local_when_fastembed_is_installed(tmp_path):
     from semcache.embedders import build_embedder
 
     cfg = Config.load(home=tmp_path, embedder="auto", embed_model="BAAI/bge-small-en-v1.5")
     assert build_embedder(cfg).id == "local:BAAI/bge-small-en-v1.5"
-
-    explicit = Config.load(home=tmp_path, embedder="local", embed_model="BAAI/bge-small-en-v1.5")
-    assert build_embedder(explicit).id == "local:BAAI/bge-small-en-v1.5"

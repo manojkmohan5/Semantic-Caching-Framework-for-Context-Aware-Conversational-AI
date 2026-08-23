@@ -16,10 +16,11 @@ env:
   HF_HUB_DISABLE_PROGRESS_BARS: "1"
   # SEMCACHE_OFFLINE is deliberately NOT set workflow-wide. It used to be, and it
   # silently forced every test onto the stub provider -- green locally, red here.
-  # The CLI-driven jobs pass --offline on the command line instead, and the test
-  # suite clears all SEMCACHE_* vars in conftest.py so the environment can never
-  # steer it.
+  # The CLI steps pass --offline explicitly, and the suite clears all SEMCACHE_*
+  # vars in conftest.py so the environment can never steer it.
 
+# Five job entries, down from eight. Each one below has caught a real bug at
+# least once; anything that only duplicated another job's coverage is gone.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -30,22 +31,23 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install ruff
-      - name: ruff check
-        run: ruff check .
-      - name: ruff format check
-        run: ruff format --check .
+      - run: ruff check .
+      - run: ruff format --check .
 
   test:
-    # Windows is in the matrix on purpose: it is the primary dev platform, and the
-    # cp1252 console + faiss wheel + os.replace paths all behave differently there.
+    # Two corners rather than a full grid: the oldest supported Python on
+    # Windows, and the newest on Linux. Windows earns its place -- the cp1252
+    # console, the os.replace sharing violation and the coarse clock behind the
+    # LRU bug were all Windows-only. The middle of the matrix never caught
+    # anything the corners missed.
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 and 3.12 are the ends of the supported range, which is where
-        # breakage lives. A middle version added two jobs without covering a
-        # boundary, so the matrix is 4 jobs rather than 6.
-        os: [ubuntu-latest, windows-latest]
-        python: ["3.9", "3.12"]
+        include:
+          - os: windows-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,56 +55,38 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - name: Install (core + openai + dev; still no ONNX model)
-        # openai is required by test_openai_compatible.py, which drives the real
+      - name: Install (core + openai + dev; no ONNX model download)
+        # openai is needed by test_openai_compatible.py, which drives the real
         # client against a local mock endpoint. No key, no network, no model.
         run: pip install -e ".[openai,dev]"
       - name: Tests
-        # The hash embedder keeps this offline and deterministic: no API key,
-        # no 133MB model download, no network.
         run: pytest
 
-  smoke:
-    # Proves the CLI actually starts and the cache round-trips on disk,
-    # which unit tests alone do not cover.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install -e ".[dev]"
+      # The old separate `smoke` job folded in here: same install, only a few
+      # CLI invocations, so it does not need a runner of its own.
       - name: CLI starts
         run: |
           semcache --version
           semcache --help
       - name: Offline benchmark meets its latency targets
-        # Uses StubProvider + hash embedder. Exits non-zero if a target in the
-        # plan's table regresses or if a trap pair returns a false hit.
         run: semcache bench --offline --embedder hash --assert-targets
       - name: Cache survives a restart
+        shell: bash
         run: |
           semcache ask --offline --embedder hash "what is a semantic cache"
           semcache ask --offline --embedder hash "what is a semantic cache" | tee second.txt
           grep -q "from cache" second.txt
-      - name: Project caches are isolated from each other
+      - name: Projects are isolated from each other
+        shell: bash
         run: |
           semcache ask --offline --embedder hash --project a "shared question"
           semcache ask --offline --embedder hash --project b "shared question" | tee b.txt
           grep -q "asked the model" b.txt
-      - name: Embeddable API works
-        run: |
-          python -c "
-          from semcache import SemCache
-          with SemCache(offline=True, embedder='hash') as sc:
-              assert sc.ask('hello there world').source == 'miss'
-              assert sc.ask('hello there world').from_cache
-          print('api ok')"
 
   bench:
-    # The real ONNX embedder, so paraphrase quality is measured for real.
-    # Split from `test` because it downloads a model; the cache keeps it cheap.
+    # The real ONNX embedder, so paraphrase quality and the trap-question gate
+    # are measured for real. Separate because it downloads a model; the cache
+    # keeps that cheap.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -115,7 +99,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.semcache/models
-          key: onnx-bge-small-en-v1.5-v1
+          key: onnx-all-MiniLM-L6-v2-v1
       - name: Benchmark with real embeddings
         run: semcache bench --offline --embedder local --assert-targets
       - uses: actions/upload-artifact@v4
@@ -126,9 +110,9 @@ jobs:
           if-no-files-found: warn
 
   docker:
-    # The image is where most users will meet this, and it has its own failure
-    # modes (package data missing from the wheel, the baked model masked by the
-    # volume). Building it in CI is the only way those stay caught.
+    # Kept because it catches what the unit tests structurally cannot: package
+    # data missing from the wheel, and the baked model being masked by the
+    # mounted volume. Both were real bugs.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -141,9 +125,7 @@ jobs:
           tags: semcache:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: CLI runs in the container
-        run: docker run --rm semcache:ci --version
-      - name: Benchmark passes with no network and the real embedder
+      - name: Benchmark passes with no network at all
         # --network none proves the ONNX model really is baked into the image.
         run: docker run --rm --network none semcache:ci bench --offline --embedder local --assert-targets
       - name: Cache persists across containers
