@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Callable
 
-from .cache import SemanticCache
+from .cache import SEMANTIC, SemanticCache
 from .metrics import Metrics, Record, estimate_cost
 from .providers import ProviderError, model_info
 
@@ -136,16 +136,37 @@ class ChatSession:
                 rec.best_below = best
 
         if hit is not None:
-            return self._from_cache(hit, rec, info, started, on_chunk)
+            return self._from_cache(hit, rec, info, started, on_chunk, vector)
 
         # --- tier 3: the model
         return self._from_model(prompt, vector, rec, info, started, on_chunk)
 
     # ------------------------------------------------------------- cache branch
-    def _from_cache(self, hit, rec, info, started, on_chunk) -> Turn:
+    def _from_cache(self, hit, rec, info, started, on_chunk, vector=None) -> Turn:
         text = hit.response
         if on_chunk:
             on_chunk(text)
+
+        # Alias the new wording onto the same answer. Next time this phrasing
+        # appears it is an exact hit, and the cache grows towards how people
+        # actually ask -- every accepted paraphrase widens the net for the next.
+        if (
+            self.cfg.alias_hits
+            and hit.kind == SEMANTIC
+            and vector is not None
+            and rec.prompt
+            and self.cache.store.by_hash(rec.prompt) is None
+        ):
+            self.cache.put(
+                prompt=rec.prompt,
+                response=text,
+                vector=vector,
+                session_id=self.session_id,
+                provider=hit.entry.provider or self.provider.name,
+                model=hit.entry.model or self.provider.model,
+                prompt_tokens=hit.entry.prompt_tokens,
+                response_tokens=hit.entry.response_tokens,
+            )
         rec.outcome = hit.kind
         rec.similarity = hit.similarity
         rec.matched_id = hit.entry.id
@@ -170,7 +191,7 @@ class ChatSession:
         first_token_at: float | None = None
         t0 = time.perf_counter()
         try:
-            for piece in self.provider.stream_chat(prompt, self.history):
+            for piece in self.provider.stream_chat(prompt, self._sendable_history()):
                 if first_token_at is None:
                     first_token_at = time.perf_counter()
                 chunks.append(piece)
@@ -248,6 +269,16 @@ class ChatSession:
             note += f" · no close saved answer (best was {rec.best_below * 100:.0f}%)"
         return Turn("error", "", self.metrics.record(rec), note)
 
+    def _sendable_history(self) -> list:
+        """Turns actually sent to the model.
+
+        history_turns=0 makes every question standalone, which is the cheapest
+        and usually right for a Q&A cache; 1 keeps immediate follow-ups working.
+        """
+        if self.cfg.history_turns <= 0:
+            return []
+        return self.history[-(self.cfg.history_turns * 2) :]
+
     # ----------------------------------------------------------------- history
     def _remember(self, prompt: str | None, answer: str) -> None:
         if not prompt:
@@ -256,7 +287,9 @@ class ChatSession:
         self.history.append({"role": "assistant", "content": answer})
         # Keep only what the context window of the embedder actually uses, plus
         # a little slack for the provider's own conversational continuity.
-        limit = max(self.cfg.context_turns, 4) * 2
+        # Keep only what is actually sent to the model plus what the anaphora
+        # check may need. Every retained turn is re-billed on every miss.
+        limit = max(self.cfg.history_turns, self.cfg.context_turns, 1) * 2
         if len(self.history) > limit:
             self.history = self.history[-limit:]
 

@@ -37,6 +37,16 @@ def add(cache, prompt, response="answer", session="s1"):
     )
 
 
+def _session(cache):
+    """A ChatSession wired to the stub provider, for pipeline-level checks."""
+    from semcache.chat import ChatSession
+    from semcache.metrics import Metrics
+    from semcache.providers import StubProvider
+
+    provider = StubProvider(cfg=cache.cfg)
+    return ChatSession(cache.cfg, provider, cache.embedder, cache, Metrics(cache.cfg.metrics_path))
+
+
 def look(cache, prompt, session="s1"):
     return cache.lookup(prompt, cache.embedder.encode_one(prompt), session)
 
@@ -593,3 +603,51 @@ def test_invisible_characters_do_not_defeat_the_exact_tier(tmp_path):
     assert hit is not None
     assert hit.kind == "exact", "a BOM must not push this into the semantic tier"
     cache.close()
+
+
+def test_aliasing_turns_a_paraphrase_into_an_exact_hit(tmp_path):
+    """A semantic hit also stores the new wording against the same answer, so the
+    next time that phrasing appears it costs no embedding at all. Worth most with
+    --embedder api, where every lookup is a billed network call."""
+    cache = make_cache(tmp_path, threshold=0.40, alias_hits=True)
+    session = _session(cache)
+
+    session.ask("checkout api returns 504 on large carts")
+    assert cache.store.count() == 1
+
+    second = session.ask("checkout api 504 large carts")
+    assert second.outcome == "semantic"
+    assert cache.store.count() == 2, "the new wording should be aliased in"
+
+    third = session.ask("checkout api 504 large carts")
+    assert third.outcome == "exact", "the aliased wording is now an exact hit"
+    assert cache.store.count() == 2, "and is not stored twice"
+    cache.close()
+
+
+def test_aliasing_can_be_turned_off(tmp_path):
+    cache = make_cache(tmp_path, threshold=0.40, alias_hits=False)
+    session = _session(cache)
+    session.ask("checkout api returns 504 on large carts")
+    assert session.ask("checkout api 504 large carts").outcome == "semantic"
+    assert cache.store.count() == 1
+    cache.close()
+
+
+def test_history_sent_to_the_model_is_bounded(tmp_path):
+    """Every retained turn is re-billed on every miss. A measured session sent
+    1,233 input tokens instead of 21 because four exchanges rode along."""
+    cache = make_cache(tmp_path, history_turns=1)
+    session = _session(cache)
+    for i in range(5):
+        session.ask(f"distinct question number {i} about caching")
+
+    assert len(session._sendable_history()) == 2, "one exchange = two messages"
+
+    none_sent = make_cache(tmp_path / "b", history_turns=0)
+    bare = _session(none_sent)
+    bare.ask("first question about something")
+    bare.ask("second question about something else")
+    assert bare._sendable_history() == [], "history_turns=0 sends nothing"
+    cache.close()
+    none_sent.close()

@@ -38,6 +38,8 @@ _COERCE = {
     "max_tokens": int,
     "ttl_seconds": _as_opt_float,
     "context_turns": int,
+    "history_turns": int,
+    "alias_hits": _as_bool,
     "temperature": float,
     "top_k": int,
     "flush_every": int,
@@ -59,27 +61,48 @@ class Config:
     home: Path = Path.home() / ".semcache"
 
     # --- matching ---
-    #: Cosine score required to reuse an answer. High on purpose: a wrong answer
-    #: served confidently is far worse than an extra API call.
+    #: Cosine score required to reuse an answer. High on purpose: a wrong
+    #: answer served confidently is far worse than an extra API call.
     #:
-    #: 0.95 is measured, not guessed. On data/queries.jsonl with
-    #: bge-small-en-v1.5, 0.90 admitted 6 of 12 trap questions while 0.95 admits
-    #: 1 and still keeps 23 of 24 real paraphrases. Re-run `semcache bench` after
-    #: changing this.
-    threshold: float = 0.95
+    #: 0.88 is measured against the bundled query set with the default embedder
+    #: (all-MiniLM-L6-v2), where it is the lowest value that admits zero trap
+    #: questions while still reusing 23 of 24 real paraphrases. The safe floor
+    #: is embedder-specific -- bge-small needs 0.93 for the same guarantee -- so
+    #: re-run `semcache bench --embedder local` after changing either.
+    threshold: float = 0.88
     #: Lower bar used *only* when the provider is unreachable or rate-limited.
     fallback_threshold: float = 0.75
     top_k: int = 5
     scope: str = "global"  # "global" reuses across sessions; "session" filters to one
     context_turns: int = 2
+    #: Prior turns sent to the model on a miss. Each one is billed again on
+    #: every call: a measured session sent 1,233 input tokens instead of 21
+    #: because four exchanges rode along. 1 keeps immediate follow-ups working
+    #: at a fraction of the cost; 0 makes every question standalone and
+    #: cheapest.
+    history_turns: int = 1
+    #: On a semantic hit, also store the new wording pointing at the same
+    #: answer. The next time that phrasing appears it is an exact hit, and the
+    #: cache widens towards how people actually ask -- each accepted paraphrase
+    #: makes the next one more likely to land.
+    alias_hits: bool = True
 
     # --- capacity ---
-    max_entries: int = 5000
+    #: Capacity. Raised from 5,000: an entry is ~3KB and FAISS scans 50k
+    #: vectors in well under a millisecond, so a bigger cache is nearly free and
+    #: every evicted answer is a future API call.
+    max_entries: int = 50_000
     ttl_seconds: float | None = None
     max_cache_bytes: int = 256_000
 
     # --- model ---
     embedder: str = "auto"  # auto | local | api | hash
+    #: Local embedding model. all-MiniLM-L6-v2 is the default because it
+    #: separates paraphrases from near-miss traps better than bge-small on the
+    #: bundled query set -- zero false hits down to 0.877 rather than 0.932 --
+    #: while keeping the same paraphrase retention, and it is the smaller
+    #: download (90MB vs 67MB compressed, both trivial).
+    embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     provider: str | None = None
     model: str | None = None
     #: Endpoint for OpenAI-compatible hosts. Overrides the built-in preset.

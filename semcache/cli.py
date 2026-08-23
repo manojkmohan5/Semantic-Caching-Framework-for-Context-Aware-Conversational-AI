@@ -595,6 +595,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--model")
     common.add_argument("--embedder", choices=["auto", "local", "api", "hash"])
+    common.add_argument(
+        "--embed-model",
+        dest="embed_model",
+        help="local embedding model (default all-MiniLM-L6-v2; BAAI/bge-small-en-v1.5 also works)",
+    )
     common.add_argument("--threshold", type=float, help="cosine score needed to reuse (0.90)")
     common.add_argument("--max-entries", type=int, dest="max_entries")
     common.add_argument("--ttl-seconds", type=float, dest="ttl_seconds")

@@ -79,11 +79,11 @@ class HashEmbedder(Embedder):
 class LocalEmbedder(Embedder):
     """fastembed / ONNX. No torch, no network after the first run."""
 
-    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", cache_dir=None):
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2", cache_dir=None):
         self.model_name = model_name
         self.cache_dir = cache_dir
         self.id = f"local:{model_name}"
-        self.dim = 384  # bge-small-en-v1.5; corrected from the model on first encode
+        self.dim = 384  # corrected from the model itself on first encode
         self._model = None
 
     def _load(self):
@@ -142,6 +142,10 @@ class ApiEmbedder(Embedder):
         if vectors.ndim == 2 and vectors.shape[1] != self.dim:
             self.dim = int(vectors.shape[1])
         return l2_normalize(vectors)
+
+
+def _model_of(cfg) -> str:
+    return getattr(cfg, "embed_model", None) or "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def build_embedder(cfg, provider=None) -> Embedder:
