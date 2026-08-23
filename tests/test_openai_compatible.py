@@ -205,3 +205,49 @@ def test_ollama_is_gone_but_lmstudio_remains():
     names = all_provider_names()
     assert "ollama" not in names
     assert "lmstudio" in names
+
+
+def test_openrouter_offers_a_browse_row_not_just_the_current_model(tmp_path, monkeypatch):
+    """The only OpenRouter entry used to be the model already selected, so the
+    other several hundred were unreachable from the picker."""
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    cfg = Config.load(home=tmp_path, embedder="hash", provider="openrouter", model="a/b")
+    session = cli.build_session(cfg, "sk-or-v1-x", "openrouter", "a/b")
+
+    rows = [c for c in cli.build_choices(cfg, session) if c.provider == "openrouter"]
+    assert any(r.model == "a/b" for r in rows), "the current model stays listed"
+    assert any(r.model is None for r in rows), "and a browse row must be offered"
+    session.cache.close()
+
+
+def test_fetched_model_list_can_be_filtered(endpoint, tmp_path, monkeypatch):
+    """A fixed top-N made most of a 400-model list unreachable, so free text
+    narrows it instead."""
+    from semcache import cli
+    from semcache.ui import Style
+
+    many = [f"vendor-{i}/model-{i}" for i in range(60)] + ["z-ai/glm-5.2:free"]
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli, "list_models", lambda *_a, **_k: sorted(many))
+
+    replies = iter(["glm", "1"])  # filter, then take the single match
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(replies))
+
+    cfg = Config.load(home=tmp_path, provider="openrouter")
+    assert cli._ask_model(cfg, "openrouter", "k", endpoint) == "z-ai/glm-5.2:free"
+
+
+def test_fetched_list_cancels_cleanly(endpoint, tmp_path, monkeypatch):
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.setattr(cli, "list_models", lambda *_a, **_k: ["a/b", "c/d"])
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "exit")
+    cfg = Config.load(home=tmp_path, provider="openrouter")
+    assert cli._ask_model(cfg, "openrouter", "k", endpoint) == ""

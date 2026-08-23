@@ -49,6 +49,9 @@ STYLE = Style()
 
 DOT_SEP = "·"
 
+#: Rows shown per page in the model picker before asking for a filter.
+PAGE = 25
+
 #: Local servers that accept any key, so the picker must not claim they need one.
 LOCAL_PROVIDERS = {"lmstudio"}
 
@@ -472,9 +475,13 @@ def build_choices(cfg: Config, session: ChatSession) -> list:
                     Choice(provider, info.id, price, bool(key), (provider, info.id) == current)
                 )
         else:
-            # No catalogue: offer the provider, and the model it is on right now.
-            model = session.provider.model if session.provider.name == provider else None
-            choices.append(Choice(provider, model, "", bool(key), (provider, model) == current))
+            # No fixed catalogue. Offer the model in use, AND always a row that
+            # goes and fetches the host's real list -- otherwise the only
+            # OpenRouter entry was the one already selected, so there was no way
+            # to reach the several hundred others.
+            if session.provider.name == provider and session.provider.model:
+                choices.append(Choice(provider, session.provider.model, "", bool(key), True))
+            choices.append(Choice(provider, None, "", bool(key), False))
     choices.sort(key=lambda c: (not c.is_current, not c.has_key, c.provider))
     return choices
 
@@ -492,7 +499,7 @@ def _render(choices: list, query: str) -> None:
             else:
                 tag = STYLE.hit("key set") if choice.has_key else STYLE.faint("needs a key")
             out(f"  {STYLE.strong(choice.provider.upper())}  {tag}")
-        name = choice.model or STYLE.faint("(choose a model)")
+        name = choice.model or STYLE.accent("browse models from this provider...")
         marker = STYLE.hit("  <- current") if choice.is_current else ""
         price = STYLE.faint(choice.price) if choice.price else ""
         out(f"   {i:>3}  {name:<34} {price}{marker}")
@@ -563,16 +570,35 @@ def _ask_model(cfg: Config, provider: str, key: str, base_url: str | None) -> st
     out("  " + STYLE.faint(f"asking {provider} what it serves..."))
     available = list_models(provider, key, base_url, cfg)
     if available:
-        for i, name in enumerate(available[:30], 1):
-            out(f"   {i:>3}  {name}")
-        if len(available) > 30:
-            out("  " + STYLE.faint(f"...and {len(available) - 30} more; type a name to use one"))
-        answer = _prompt(f"  {STYLE.faint('number or name')} > ")
-        if not answer:
-            return ""
-        if answer.isdigit() and 1 <= int(answer) <= len(available):
-            return available[int(answer) - 1]
-        return answer
+        out("  " + STYLE.faint(f"{len(available)} models available"))
+        # OpenRouter serves several hundred, so this filters rather than just
+        # truncating: a fixed top-30 made most of them unreachable.
+        query = ""
+        while True:
+            matches = [m for m in available if query.lower() in m.lower()] if query else available
+            shown = matches[:PAGE]
+            out("")
+            if query:
+                out(f"  {STYLE.faint(f'filter {query!r} -- {len(matches)} match')}")
+            for i, name in enumerate(shown, 1):
+                out(f"   {i:>3}  {name}")
+            if len(matches) > PAGE:
+                out(
+                    "  "
+                    + STYLE.faint(f"...{len(matches) - PAGE} more; type text to narrow the list")
+                )
+            answer = _prompt(f"  {STYLE.faint('number, text to filter, or Enter to cancel')} > ")
+            if not answer or answer.lower() in CANCEL_WORDS:
+                return ""
+            if answer.isdigit():
+                index = int(answer)
+                if 1 <= index <= len(shown):
+                    return shown[index - 1]
+                out(f"  {STYLE.error('no such number')}")
+                continue
+            if answer in available:  # a full id pasted in
+                return answer
+            query = answer
 
     example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
     out("  " + STYLE.faint(f"could not reach {provider}; enter a model name"))
