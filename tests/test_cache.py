@@ -682,3 +682,43 @@ def test_every_config_flag_actually_reaches_config():
         args = build_parser().parse_args(argv)
         cfg = Config.load(**{k: getattr(args, k, None) for k in _CONFIG_KEYS})
         assert getattr(cfg, field) == expected, f"{argv[1]} did not reach {field}"
+
+
+def test_slash_model_switches_and_keeps_the_cache(tmp_path, monkeypatch):
+    """The cache namespace is keyed on the embedder, not the chat model, so
+    answers stay reusable whichever model wrote them."""
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("must not prompt"))
+
+    cfg = Config.load(home=tmp_path, embedder="hash", offline=True, threshold=0.40)
+    session = cli.build_session(cfg, "", "stub", "stub-1")
+    session.ask("what causes 504 errors on large carts")
+    assert session.cache.stats()["entries"] == 1
+
+    cli.switch_model(cfg, session, "/model some-other-model")
+    assert session.provider.model == "some-other-model"
+
+    reused = session.ask("504 errors large carts what causes")
+    assert reused.from_cache, "a model switch must not invalidate the cache"
+    assert "answered by stub-1" in reused.note, "and should credit the original model"
+
+    # persisted, so the next launch starts on the new model
+    assert Config.load(home=tmp_path).model == "some-other-model"
+    session.cache.close()
+
+
+def test_slash_model_with_no_argument_does_not_change_anything(tmp_path, monkeypatch):
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "")  # user pressed Enter
+
+    cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
+    session = cli.build_session(cfg, "", "stub", "stub-1")
+    cli.switch_model(cfg, session, "/model")
+    assert session.provider.model == "stub-1"
+    session.cache.close()

@@ -338,6 +338,7 @@ def build_session(cfg: Config, key: str, provider_name: str, model: str) -> Chat
 
 COMMANDS = (
     ("/stats", "what the cache has saved you"),
+    ("/model", "switch chat model, keeping the cache"),
     ("/dash", "show this dashboard again"),
     ("/clear", "forget every saved answer"),
     ("/help", "the command list"),
@@ -397,6 +398,66 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
     return dashboard(st, panels, list(COMMANDS))
 
 
+def switch_model(cfg: Config, session: ChatSession, typed: str) -> None:
+    """Change the chat model without restarting, and without losing the cache.
+
+    The cache survives on purpose: its namespace is keyed on the *embedder*, not
+    the chat model, so answers stay reusable whichever model wrote them. An entry
+    written by a different model is still served, and the status line says which
+    model produced it.
+    """
+    provider = session.provider.name
+    parts = typed.split(maxsplit=1)
+    wanted = parts[1].strip() if len(parts) > 1 else ""
+
+    options = CATALOG.get(provider, [])
+    if not wanted:
+        out("")
+        if options:
+            for i, info in enumerate(options, 1):
+                price = (
+                    f"${info.price_in:.2f}/${info.price_out:.2f} per Mtok"
+                    if info.price_in is not None
+                    else "price not tracked"
+                )
+                marker = STYLE.hit(" ← current") if info.id == session.provider.model else ""
+                out(f"    {i}) {info.id:<22} {STYLE.faint(price)}{marker}")
+            choice = _prompt(f"  Model [1-{len(options)} or a name]: ")
+            if not choice:
+                return
+            wanted = (
+                options[int(choice) - 1].id
+                if choice.isdigit() and 1 <= int(choice) <= len(options)
+                else choice
+            )
+        else:
+            example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
+            out(f"  Current: {STYLE.strong(session.provider.model)}")
+            out(f"  {STYLE.faint('Example: ' + example)}")
+            wanted = _prompt("  Model: ")
+            if not wanted:
+                return
+
+    if wanted == session.provider.model:
+        out(f"  Already using {STYLE.strong(wanted)}.")
+        return
+
+    previous = session.provider.model
+    session.provider.model = wanted
+    _persist_model(cfg, provider, wanted)
+    out(
+        f"  {STYLE.hit('switched')} {STYLE.faint(previous)} "
+        f"{STYLE.faint('->')} {STYLE.strong(wanted)}"
+    )
+    out(
+        "  "
+        + STYLE.faint(
+            f"{session.cache.stats()['entries']} cached answers are still available "
+            "-- the cache is shared across models."
+        )
+    )
+
+
 def run_repl(cfg: Config, session: ChatSession) -> int:
     # Land on the identity block, not the full dashboard: it is what you read
     # every launch, so it stays short. /dash opens the detailed panels.
@@ -437,6 +498,12 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
             if confirm in ("y", "yes"):
                 removed = session.cache.clear()
                 out(f"  Cleared {removed} saved answers.")
+            continue
+        if lowered in ("/dash", "/dashboard"):
+            out(_dashboard(cfg, session))
+            continue
+        if lowered.split()[0] in ("/model", "/models"):
+            switch_model(cfg, session, prompt)
             continue
 
         # Re-render the question as a framed block. The terminal already echoed
