@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semcache"
+version = "0.1.0"
+description = "Semantic caching layer for LLM apps: FAISS vector search + LRU eviction in front of any chat model"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "faiss-cpu>=1.9.0",
+    "python-dotenv>=1.0",
+]
+
+# Everything below is optional and lazily imported, so the core install stays small
+# and you only pay for the provider you actually use.
+[project.optional-dependencies]
+# Local ONNX embedder. Deliberately NOT sentence-transformers: fastembed is ~50MB
+# of onnxruntime instead of ~2.5GB of torch.
+local = ["fastembed>=0.4"]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.40"]
+gemini = ["google-genai>=1.0"]
+all = ["fastembed>=0.4", "anthropic>=0.40", "openai>=1.40", "google-genai>=1.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+semcache = "semcache.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["semcache*"]
+
+# The benchmark query set ships with the package: once installed, walking up from
+# __file__ lands in site-packages, so it cannot be found outside the wheel.
+[tool.setuptools.package-data]
+semcache = ["data/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
