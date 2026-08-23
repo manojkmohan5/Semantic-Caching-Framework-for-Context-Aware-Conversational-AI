@@ -722,3 +722,57 @@ def test_slash_model_with_no_argument_does_not_change_anything(tmp_path, monkeyp
     cli.switch_model(cfg, session, "/model")
     assert session.provider.model == "stub-1"
     session.cache.close()
+
+
+def test_slash_provider_switches_key_model_and_endpoint(tmp_path, monkeypatch):
+    """A whole different provider mid-session, with its own key -- and the cache
+    stays usable, because its namespace depends on the embedder, not on who
+    answered."""
+    import getpass as getpass_mod
+
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    replies = iter(["openrouter", "z-ai/glm-5.2:free"])
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(replies))
+    monkeypatch.setattr(getpass_mod, "getpass", lambda *_a, **_k: "sk-or-v1-new")
+
+    cfg = Config.load(
+        home=tmp_path, embedder="hash", threshold=0.40, provider="stub", model="stub-1"
+    )
+    session = cli.build_session(cfg, "", "stub", "stub-1")
+    session.ask("what causes 504 errors on large carts")
+
+    cli.switch_provider(cfg, session, "/provider")
+
+    assert session.provider.name == "openrouter"
+    assert session.provider.model == "z-ai/glm-5.2:free"
+    assert session.provider.api_key == "sk-or-v1-new"
+    assert session.provider.base_url == "https://openrouter.ai/api/v1"
+
+    reused = session.ask("504 errors large carts what causes")
+    assert reused.from_cache, "a provider switch must not invalidate the cache"
+
+    saved = Config.load(home=tmp_path)
+    assert (saved.provider, saved.model) == ("openrouter", "z-ai/glm-5.2:free")
+    # the key is written under the generic var for compatible hosts
+    assert "sk-or-v1-new" in cfg.env_path.read_text(encoding="utf-8")
+    session.cache.close()
+
+
+def test_slash_provider_refuses_in_offline_mode(tmp_path, monkeypatch):
+    """build_provider always returns the stub offline, so a 'switch' would report
+    a provider that is not actually in use."""
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("must not prompt"))
+
+    cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
+    session = cli.build_session(cfg, "", "stub", "stub-1")
+    cli.switch_provider(cfg, session, "/provider")
+    assert session.provider.name == "stub"
+    session.cache.close()

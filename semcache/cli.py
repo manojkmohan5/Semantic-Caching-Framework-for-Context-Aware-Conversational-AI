@@ -13,7 +13,7 @@ import getpass
 import os
 import sys
 import time
-from dataclasses import fields
+from dataclasses import fields, replace
 
 from . import __version__
 from .cache import SemanticCache
@@ -44,6 +44,8 @@ from .ui import prompt as ui_prompt
 #: Resolved once at import; colour is dropped automatically when stdout is not a
 #: terminal, so piped output and log files stay clean.
 STYLE = Style()
+
+DOT_SEP = "·"
 
 KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -247,6 +249,20 @@ def offer_to_save(cfg: Config, key: str, provider: str, model: str) -> None:
     _persist_model(cfg, provider, model)
 
 
+def _save_key(cfg: Config, key: str, provider: str) -> None:
+    """Persist a key after a provider switch, best effort."""
+    with contextlib.suppress(OSError):
+        _write_key(cfg, key, provider)
+
+
+def _write_key(cfg: Config, key: str, provider: str) -> None:
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    cfg.env_path.write_text(f"{_key_var(provider)}={key}\n", encoding="utf-8")
+    # No-op on Windows, correct on POSIX.
+    with contextlib.suppress(OSError):
+        os.chmod(cfg.env_path, 0o600)
+
+
 def _key_var(provider: str) -> str:
     """Env var name to save the key under.
 
@@ -339,6 +355,7 @@ def build_session(cfg: Config, key: str, provider_name: str, model: str) -> Chat
 COMMANDS = (
     ("/stats", "what the cache has saved you"),
     ("/model", "switch chat model, keeping the cache"),
+    ("/provider", "switch provider and API key, keeping the cache"),
     ("/dash", "show this dashboard again"),
     ("/clear", "forget every saved answer"),
     ("/help", "the command list"),
@@ -396,6 +413,94 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
         ),
     ]
     return dashboard(st, panels, list(COMMANDS))
+
+
+def switch_provider(cfg: Config, session: ChatSession, typed: str) -> None:
+    """Move the session to a different provider, with its own key and model.
+
+    Rebuilds the provider in place. The cache is untouched for the same reason a
+    model switch leaves it alone: its namespace depends on the embedder, not on
+    who answers.
+    """
+    if cfg.offline:
+        # build_provider always returns the stub in offline mode, so a "switch"
+        # would report a provider that is not actually being used.
+        out("  " + STYLE.faint("offline mode always uses the built-in stub model."))
+        out("  " + STYLE.faint("restart without --offline to use a real provider."))
+        return
+
+    names = all_provider_names()
+    parts = typed.split(maxsplit=1)
+    wanted = parts[1].strip().lower() if len(parts) > 1 else ""
+
+    if wanted not in names:
+        out("")
+        out(f"  Current: {STYLE.strong(session.provider.name)}")
+        for i, name in enumerate(names, 1):
+            marker = STYLE.hit(" ← current") if name == session.provider.name else ""
+            out(f"    {i:>2}) {name}{marker}")
+        choice = _prompt(f"  Provider [1-{len(names)} or a name]: ").lower()
+        if not choice:
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            wanted = names[int(choice) - 1]
+        elif choice in names:
+            wanted = choice
+        else:
+            out(f"  {STYLE.error('unknown provider ' + choice)}")
+            return
+
+    # Reuse a key already in the environment for that provider rather than
+    # making the user paste one they have already configured.
+    existing = os.environ.get(KEY_ENV.get(wanted, "")) or ""
+    key = ""
+    if existing:
+        answer = _prompt(f"  Use the {KEY_ENV[wanted]} already set? [Y/n] ", "y").lower()
+        if answer in ("", "y", "yes"):
+            key = existing
+    if not key:
+        out(f"  {STYLE.faint('the paste stays hidden, so nothing appears as you type')}")
+        try:
+            key = getpass.getpass(f"  Paste your {wanted} API key (hidden): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            out("")
+            return
+    if not key:
+        out("  No key given, staying on " + STYLE.strong(session.provider.name))
+        return
+
+    base_url = None
+    if wanted == "custom":
+        base_url = _prompt("  Base URL (https://host/v1): ")
+        if not base_url:
+            out("  custom needs a base URL, staying put.")
+            return
+
+    # A fresh Config so the new provider's model prompt and base_url apply.
+    moved = replace(cfg, provider=wanted, model=None, base_url=base_url or cfg.base_url)
+    try:
+        model = choose_model(moved, wanted)
+        session.provider = build_provider(wanted, key, model, moved)
+    except (ProviderError, SystemExit) as exc:
+        out(f"  {STYLE.error(str(exc))}")
+        return
+
+    cfg.provider, cfg.model = wanted, model
+    if base_url:
+        cfg.base_url = base_url
+    _persist_model(cfg, wanted, model)
+    _save_key(cfg, key, wanted)
+    out(
+        f"  {STYLE.hit('switched')} to {STYLE.strong(wanted)} "
+        f"{STYLE.faint(DOT_SEP)} {STYLE.strong(model)}"
+    )
+    out(
+        "  "
+        + STYLE.faint(
+            f"{session.cache.stats()['entries']} cached answers are still available "
+            "-- the cache does not care which provider answered."
+        )
+    )
 
 
 def switch_model(cfg: Config, session: ChatSession, typed: str) -> None:
