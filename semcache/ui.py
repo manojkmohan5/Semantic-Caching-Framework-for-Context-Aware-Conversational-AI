@@ -17,16 +17,33 @@ import shutil
 import sys
 
 RESET = "\033[0m"
-_CODES = {
+
+#: Palette. The named roles map to 256-colour codes for a violet accent on dim
+#: greys; basic 8-colour codes are the fallback for terminals that only speak
+#: those (forced with SEMCACHE_BASIC_COLOR=1).
+_CODES_256 = {
     "bold": "1",
     "dim": "2",
-    "red": "31",
-    "green": "32",
-    "yellow": "33",
-    "blue": "34",
-    "magenta": "35",
-    "cyan": "36",
+    "accent": "38;5;141",  # violet, the brand colour
+    "accent_dim": "38;5;98",  # muted violet, for rules and bars
+    "good": "38;5;114",  # soft green, a cache hit
+    "warn": "38;5;180",  # sand, a model call
+    "alert": "38;5;168",  # rose, a degraded answer
+    "bad": "38;5;203",  # red, an error
+    "grey": "38;5;245",  # secondary text
+    "faint": "38;5;240",  # tertiary text
+}
+_CODES_BASIC = {
+    "bold": "1",
+    "dim": "2",
+    "accent": "35",
+    "accent_dim": "35",
+    "good": "32",
+    "warn": "33",
+    "alert": "35",
+    "bad": "31",
     "grey": "90",
+    "faint": "90",
 }
 
 # Box drawing, kept to characters that render in a default Windows console.
@@ -77,39 +94,58 @@ def supports_colour() -> bool:
     return _enable_windows_ansi()
 
 
+def supports_256() -> bool:
+    """Whether to use the 256-colour palette.
+
+    Practically every terminal since the 2000s handles 256 colours, so this
+    defaults to yes and offers an escape hatch rather than sniffing TERM strings.
+    """
+    if os.environ.get("SEMCACHE_BASIC_COLOR"):
+        return False
+    term = os.environ.get("TERM", "")
+    return term not in {"dumb", "vt100", "ansi"}
+
+
 class Style:
     """Wraps text in escapes, or returns it untouched when colour is off."""
 
-    def __init__(self, enabled: bool | None = None):
+    def __init__(self, enabled: bool | None = None, rich: bool | None = None):
         self.enabled = supports_colour() if enabled is None else enabled
+        self.palette = _CODES_256 if (supports_256() if rich is None else rich) else _CODES_BASIC
 
     def __call__(self, text: str, *names: str) -> str:
         if not self.enabled or not names:
             return text
-        codes = ";".join(_CODES[n] for n in names if n in _CODES)
+        codes = ";".join(self.palette[n] for n in names if n in self.palette)
         return f"\033[{codes}m{text}{RESET}" if codes else text
 
-    # Named helpers, so call sites read as intent rather than as colour.
+    # Named helpers, so call sites read as intent rather than as a colour.
     def hit(self, text: str) -> str:
-        return self(text, "green")
+        return self(text, "good")
 
     def miss(self, text: str) -> str:
-        return self(text, "yellow")
+        return self(text, "warn")
 
     def warn(self, text: str) -> str:
-        return self(text, "magenta")
+        return self(text, "alert")
 
     def error(self, text: str) -> str:
-        return self(text, "red")
+        return self(text, "bad")
 
     def faint(self, text: str) -> str:
+        return self(text, "faint")
+
+    def dim(self, text: str) -> str:
         return self(text, "grey")
 
     def strong(self, text: str) -> str:
         return self(text, "bold")
 
+    def accent(self, text: str) -> str:
+        return self(text, "accent")
+
     def brand(self, text: str) -> str:
-        return self(text, "bold", "cyan")
+        return self(text, "bold", "accent")
 
 
 def width(maximum: int = 92) -> int:
@@ -147,7 +183,7 @@ def header(
     hit_rate: float,
 ) -> str:
     """Identity block: mark, name, what is loaded, and where it lives."""
-    mark = [style(row, "cyan") for row in LOGO]
+    mark = [style(row, "accent") for row in LOGO]
     facts = [
         f"{style.brand('semcache')} {style.faint('v' + version)}",
         f"{style.strong(provider)} {style.faint(DOT)} {model}",
@@ -169,7 +205,7 @@ def header(
         tip = style.faint(
             "Nothing cached yet. Ask something, then ask it again in different words to see a hit."
         )
-    lines.append(f"  {style(BAR, 'cyan')} {tip}")
+    lines.append(f"  {style(BAR, 'accent')} {tip}")
     lines.append(
         f"  {style.faint('/help for commands')}  {style.faint(DOT)}  "
         f"{style.faint('/dash for the dashboard')}"
@@ -228,12 +264,12 @@ def user_row(style: Style, text: str) -> str:
 
 
 def answer_marker(style: Style) -> str:
-    return style("●", "cyan") + " "
+    return style("●", "accent") + " "
 
 
 def prompt(style: Style) -> str:
     """Input marker. Short, so a pasted question has room on the line."""
-    return style(BLOCK, "cyan") + " "
+    return style(BLOCK, "accent") + " "
 
 
 def redraw_last_line() -> str:
@@ -247,7 +283,7 @@ def redraw_last_line() -> str:
 
 def user_block(style: Style, text: str) -> str:
     """The question, re-rendered with a left accent bar."""
-    bar = style(BAR, "cyan")
+    bar = style(BAR, "accent_dim")
     lines = wrap(text, width() - 4)
     return "\n".join([""] + [f"  {bar} {style.strong(line)}" for line in lines])
 
