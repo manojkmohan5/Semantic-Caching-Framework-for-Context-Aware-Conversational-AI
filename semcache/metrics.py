@@ -40,10 +40,6 @@ class Record:
     error: str | None = None
     prompt: str | None = None  # omitted when log_prompts is off
 
-    @property
-    def is_hit(self) -> bool:
-        return self.outcome in {"exact", "semantic"}
-
 
 HIT_KINDS = {"exact", "semantic"}
 

@@ -196,13 +196,6 @@ class Config:
             )
         return cfg
 
-    def as_dict(self) -> dict:
-        out = {}
-        for f in fields(self):
-            value = getattr(self, f.name)
-            out[f.name] = str(value) if isinstance(value, Path) else value
-        return out
-
 
 def _drop_home(values: dict) -> dict:
     return {k: v for k, v in values.items() if k != "home"}

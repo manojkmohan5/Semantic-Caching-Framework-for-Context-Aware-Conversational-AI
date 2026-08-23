@@ -281,13 +281,6 @@ def redraw_last_line() -> str:
     return "\033[1A\033[2K"
 
 
-def user_block(style: Style, text: str) -> str:
-    """The question, re-rendered with a left accent bar."""
-    bar = style(BAR, "accent_dim")
-    lines = wrap(text, width() - 4)
-    return "\n".join([""] + [f"  {bar} {style.strong(line)}" for line in lines])
-
-
 def _compact(n: float) -> str:
     """1234 -> 1.2k. Keeps the status bar one line on a narrow terminal."""
     if n >= 1_000_000:

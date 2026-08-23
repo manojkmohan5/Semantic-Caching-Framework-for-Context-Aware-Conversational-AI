@@ -9,7 +9,6 @@ import contextlib
 import re
 import threading
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Callable
 
@@ -290,20 +289,3 @@ class ChatSession:
         limit = max(self.cfg.history_turns, self.cfg.context_turns, 1) * 2
         if len(self.history) > limit:
             self.history = self.history[-limit:]
-
-
-def stream_to(writer) -> Callable[[str], None]:
-    """Adapter so callers can hand `ask()` a file-like sink."""
-
-    def _write(piece: str) -> None:
-        writer.write(piece)
-        writer.flush()
-
-    return _write
-
-
-def iter_chunks(session: ChatSession, prompt: str) -> Iterator[str]:
-    """Generator form, used by tests that want the pieces rather than a callback."""
-    out: list[str] = []
-    session.ask(prompt, on_chunk=out.append)
-    yield from out

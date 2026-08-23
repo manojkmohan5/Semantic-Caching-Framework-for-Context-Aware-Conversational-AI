@@ -123,6 +123,12 @@ prompt
   never folded into the hit rate.
 - **Bad answers are never cached.** Empty, oversized and length-truncated
   responses are rejected, because one cached truncated answer is served forever.
+- **A paraphrase that hits is stored too** (`alias_hits`, on by default), so the
+  next time that wording appears it is an exact hit costing no embedding at all.
+  That matters most with `--embedder api`, where every lookup is a billed call.
+- **Only one prior exchange is resent** by default (`--history-turns 1`). Every
+  retained turn is re-billed on each miss: a measured session sent 1,233 input
+  tokens instead of 21 because four exchanges rode along. `0` is cheapest.
 
 ---
 
@@ -140,7 +146,7 @@ Three native SDK paths, plus every OpenAI-compatible host through one client.
 | **Kimi** (Moonshot) | `--provider kimi --model kimi-k2-0905-preview` |
 | **GLM** (Zhipu) | `--provider glm --model glm-4.6` |
 | Groq, Together | `--provider groq` / `together` |
-| **LM Studio** (local) | `--provider lmstudio` — model list is fetched from it |
+| **LM Studio** (local) | `--provider lmstudio` — no key; its model list is fetched from it |
 | anything else | `--provider custom --base-url https://your-host/v1` |
 
 ```bash
@@ -169,7 +175,8 @@ guess that would 404.
 | `semcache bench [--offline]` | replay a query set, cold vs warm |
 | `semcache clear` | forget every saved answer |
 
-In the chat loop: `/stats`, `/clear`, `/help`, `/exit`.
+In the chat loop: `/model` (pick provider + model), `/stats`, `/dash`, `/clear`,
+`/help`, `/exit`.
 
 ---
 
@@ -215,7 +222,7 @@ Money
   saved by the cache     $2.64   (70% of what this would have cost)
 
 Cache
-  9 saved answers, 28 KB   (room for 5,000)
+  9 saved answers, 28 KB   (room for 50,000)
   reused most:  "What is the fastest car?"   3 times
 ```
 
@@ -234,9 +241,12 @@ can be set by any of them.
 
 | | default | |
 |---|---|---|
-| `--threshold` | `0.95` | cosine score needed to reuse an answer |
-| `--max-entries` | `5000` | capacity before LRU eviction |
+| `--threshold` | `0.88` | cosine score needed to reuse an answer |
+| `--max-entries` | `50000` | capacity before LRU eviction |
 | `--embedder` | `auto` | `local` (ONNX) · `api` · `hash` (tests only) |
+| `--embed-model` | `all-MiniLM-L6-v2` | local embedding model |
+| `--history-turns` | `1` | prior exchanges resent on a miss; `0` is cheapest |
+| `--no-alias-hits` | off | stop storing the wording of a paraphrase that hit |
 | `--scope` | `global` | `session` restricts reuse to one session |
 | `--ttl-seconds` | off | expire answers after this long |
 | `--project` | none | isolate this project's cache from others |
@@ -320,27 +330,43 @@ semcache serve a confidently wrong answer.
 
 Every group in the bundled query set carries a *trap*: a similar-sounding question
 with a genuinely different answer ("returning 504" vs "returning 401", "add an
-index" vs "drop an index"). Measured with `bge-small-en-v1.5`:
+index" vs "drop an index"). Serving one of those is the failure that matters, and
+`bench` fails the build on it.
 
-| threshold | paraphrases reused | traps wrongly served |
-|---|---|---|
-| 0.88 | most | **12 of 12** |
-| 0.90 | 60% | **10** |
-| 0.92 | 54% | **4** |
-| 0.93 | 52% | **2** |
-| **0.94** | 50% | **0** ← measured floor |
-| **0.95** (default) | 50% | **0** |
+**The safe floor is a property of the embedding model, not a universal number.**
+Measured on the bundled set:
 
-Below 0.94, "why is checkout returning 504" starts being answered with the 401
-answer. The default is 0.95 because a confidently wrong answer is worse than an
-extra API call.
+| embedder | safe floor | paraphrases kept | note |
+|---|---|---|---|
+| **all-MiniLM-L6-v2** (default) | **0.877** | 23/24 | widest margin, ~3ms hits |
+| bge-small-en-v1.5 | 0.932 | 23/24 | narrower gap, ~14ms hits |
+| bge-base-en-v1.5 | 0.936 | 23/24 | bigger, no better |
+| mxbai-embed-large-v1 | 0.941 | 22/24 | biggest, worst |
 
-If you want more reuse, **phrase questions more consistently** rather than
-lowering the bar. Reproduce the table yourself:
+The default threshold is **0.88**, just above MiniLM's floor. Bigger embedding
+models were tested and were *worse* — a larger model narrowed the usable gap
+rather than widening it.
+
+With the default embedder, lowering the threshold costs correctness quickly:
+
+| threshold | traps wrongly served |
+|---|---|
+| **0.88** (default) | **0** |
+| 0.85 | some |
+| 0.80 | all 12 |
+
+At 0.80, "why is checkout returning 504" gets answered with the 401 answer.
+
+**If you switch embedder, re-measure.** `--embed-model BAAI/bge-small-en-v1.5`
+needs `--threshold 0.94`; 0.93 admits a trap. Reproduce any row yourself:
 
 ```bash
-semcache bench --offline --embedder local --threshold 0.90
+semcache bench --offline --embedder local --threshold 0.85
 ```
+
+If you want more reuse, prefer **phrasing questions consistently** over lowering
+the bar — and note that `--no-alias-hits` off (the default) already widens the
+cache for you, by storing the wording of each paraphrase that hit.
 
 ---
 
@@ -369,6 +395,9 @@ Other deliberate ceilings, each marked in the source:
 - The `hash` embedder is bag-of-words. It exists so tests and CI can exercise cache
   mechanics with no key, no network and no model download; it has no semantic
   understanding and is not for real use.
+- Changing `--embed-model` starts a fresh namespace, because vectors from
+  different models are not comparable. Existing answers are not lost, and
+  semcache tells you which model they are under and how to reach them.
 - Cost is reported only for models with a known price. Anthropic rates ship built
   in; OpenAI, Gemini and the compatible hosts are left unset rather than guessed,
   so `/stats` says "not tracked" instead of showing an invented number.
