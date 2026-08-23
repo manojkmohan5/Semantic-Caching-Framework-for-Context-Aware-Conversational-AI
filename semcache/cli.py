@@ -29,6 +29,7 @@ from .providers import (
     context_window,
     default_model,
     detect_provider,
+    list_models,
     needs_explicit_model,
 )
 from .ui import (
@@ -49,7 +50,7 @@ STYLE = Style()
 DOT_SEP = "·"
 
 #: Local servers that accept any key, so the picker must not claim they need one.
-LOCAL_PROVIDERS = {"ollama", "lmstudio"}
+LOCAL_PROVIDERS = {"lmstudio"}
 
 KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -183,7 +184,6 @@ _MODEL_EXAMPLES = {
     "nvidia": "meta/llama-3.1-70b-instruct",
     "groq": "llama-3.3-70b-versatile",
     "together": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    "ollama": "llama3.1",
     "lmstudio": "local-model",
 }
 
@@ -549,6 +549,33 @@ def pick_model(cfg: Config, session: ChatSession, typed: str) -> None:
         query = answer  # treat anything else as a new filter
 
 
+def _ask_model(cfg: Config, provider: str, key: str, base_url: str | None) -> str:
+    """Pick a model for a host with no fixed catalogue.
+
+    Asks the host what it serves first: LM Studio serves whatever you have
+    loaded, and typing that name from memory is exactly the sort of thing that
+    404s. Falls back to typing a name when the host cannot be reached.
+    """
+    out("  " + STYLE.faint(f"asking {provider} what it serves..."))
+    available = list_models(provider, key, base_url, cfg)
+    if available:
+        for i, name in enumerate(available[:30], 1):
+            out(f"   {i:>3}  {name}")
+        if len(available) > 30:
+            out("  " + STYLE.faint(f"...and {len(available) - 30} more; type a name to use one"))
+        answer = _prompt(f"  {STYLE.faint('number or name')} > ")
+        if not answer:
+            return ""
+        if answer.isdigit() and 1 <= int(answer) <= len(available):
+            return available[int(answer) - 1]
+        return answer
+
+    example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
+    out("  " + STYLE.faint(f"could not reach {provider}; enter a model name"))
+    out("  " + STYLE.faint(f"example: {example}"))
+    return _prompt("  Model: ")
+
+
 def _apply(cfg: Config, session: ChatSession, choice: Choice) -> None:
     """Switch to a chosen provider/model, asking only for what is missing."""
     provider = choice.provider
@@ -575,7 +602,9 @@ def _apply(cfg: Config, session: ChatSession, choice: Choice) -> None:
     moved = replace(cfg, provider=provider, model=model, base_url=base_url)
     try:
         if not model:
-            model = choose_model(moved, provider)
+            model = _ask_model(moved, provider, key, base_url)
+            if not model:
+                return
             moved = replace(moved, model=model)
         session.provider = build_provider(provider, key, model, moved)
     except (ProviderError, SystemExit) as exc:
@@ -801,7 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=all_provider_names() + ["stub"],
         help="anthropic/openai/gemini, or an OpenAI-compatible host "
-        "(deepseek, kimi, glm, nvidia, groq, openrouter, together, ollama, "
+        "(deepseek, kimi, glm, nvidia, groq, openrouter, together, "
         "lmstudio, custom)",
     )
     common.add_argument(

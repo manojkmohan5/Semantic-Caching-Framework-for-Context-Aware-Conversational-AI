@@ -162,3 +162,46 @@ def test_provider_errors_are_one_readable_line():
 
     # An unmapped error still collapses to a sentence, not a blob.
     assert ProviderError(raw, "error").user_message == "Insufficient credits"
+
+
+def test_lmstudio_model_list_is_fetched_from_the_host(endpoint, monkeypatch):
+    """LM Studio serves whatever you have loaded, so typing that name from memory
+    is exactly what 404s. Ask the host instead."""
+    from semcache.providers import list_models
+
+    class _Models(_Handler):
+        def do_GET(self):
+            body = json.dumps(
+                {"data": [{"id": "qwen2.5-7b-instruct"}, {"id": "llama-3.2-3b"}]}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = HTTPServer(("127.0.0.1", 0), _Models)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    try:
+        found = list_models("lmstudio", "", url, Config.load())
+        assert found == ["llama-3.2-3b", "qwen2.5-7b-instruct"], found
+    finally:
+        server.shutdown()
+
+
+def test_model_listing_never_raises_when_the_host_is_down():
+    """A convenience, never a hard dependency: an unreachable host must fall back
+    to typing a name rather than crash the picker."""
+    from semcache.providers import list_models
+
+    # Port 1 is reserved and never listening.
+    assert list_models("lmstudio", "", "http://127.0.0.1:1/v1", Config.load()) == []
+
+
+def test_ollama_is_gone_but_lmstudio_remains():
+    from semcache.providers import all_provider_names
+
+    names = all_provider_names()
+    assert "ollama" not in names
+    assert "lmstudio" in names

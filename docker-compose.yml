@@ -23,7 +23,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       # Any other host: set the key here plus PROVIDER (and MODEL) below.
       #   grok | deepseek | kimi | glm | nvidia | groq | openrouter |
-      #   together | ollama | lmstudio | custom
+      #   together | lmstudio | custom
       SEMCACHE_API_KEY: ${SEMCACHE_API_KEY:-}
       SEMCACHE_PROVIDER: ${SEMCACHE_PROVIDER:-}
       SEMCACHE_MODEL: ${SEMCACHE_MODEL:-}

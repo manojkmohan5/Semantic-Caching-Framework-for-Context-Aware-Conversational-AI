@@ -60,7 +60,6 @@ OPENAI_COMPATIBLE = {
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "together": "https://api.together.xyz/v1",
-    "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "custom": "",  # requires --base-url
 }
@@ -484,6 +483,32 @@ def build_provider(provider: str, api_key: str, model: str, cfg) -> Provider:
         known = ", ".join([*_CLASSES, *OPENAI_COMPATIBLE])
         raise ProviderError(f"unknown provider {provider!r}. Known: {known}", "error") from None
     return cls(api_key, model, cfg)
+
+
+def list_models(provider: str, api_key: str, base_url: str | None, cfg) -> list[str]:
+    """Ask an OpenAI-compatible host what it actually serves.
+
+    LM Studio and OpenRouter both expose /v1/models, so the picker can show real
+    model ids instead of asking the user to type one from memory. Returns an
+    empty list on any failure -- this is a convenience, never a hard dependency.
+    """
+    try:
+        import openai
+    except ImportError:
+        return []
+    url = base_url or OPENAI_COMPATIBLE.get(provider) or None
+    if not url:
+        return []
+    try:
+        client = openai.OpenAI(
+            api_key=api_key or "not-needed",
+            base_url=url,
+            timeout=8.0,
+            max_retries=0,
+        )
+        return sorted(m.id for m in client.models.list().data)
+    except Exception:
+        return []
 
 
 def all_provider_names() -> list[str]:

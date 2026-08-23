@@ -140,12 +140,12 @@ Three native SDK paths, plus every OpenAI-compatible host through one client.
 | **Kimi** (Moonshot) | `--provider kimi --model kimi-k2-0905-preview` |
 | **GLM** (Zhipu) | `--provider glm --model glm-4.6` |
 | Groq, Together | `--provider groq` / `together` |
-| **Ollama, LM Studio** (local) | `--provider ollama --model llama3.1` |
+| **LM Studio** (local) | `--provider lmstudio` — model list is fetched from it |
 | anything else | `--provider custom --base-url https://your-host/v1` |
 
 ```bash
 semcache --provider grok --model grok-4
-semcache --provider ollama --model llama3.1        # fully offline, no key
+semcache --provider lmstudio                       # local, no key needed
 ```
 
 `--base-url` overrides any preset, so a corporate gateway or proxy works too.
