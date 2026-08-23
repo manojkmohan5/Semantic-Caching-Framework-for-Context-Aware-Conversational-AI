@@ -30,10 +30,14 @@ _CODES = {
 }
 
 # Box drawing, kept to characters that render in a default Windows console.
-BAR = "┃"  # heavy vertical: the accent bar beside a question
+BAR = "┃"  # heavy vertical: accent bar
 BLOCK = "▌"  # left half block: the input marker
 LINE = "─"
 DOT = "·"
+
+#: Three-row mark built from block characters. Deliberately tiny: it survives a
+#: narrow terminal and any monospace font, unlike a large ASCII-art logo.
+LOGO = ("█▀█▀█", "█▀▀▀█", "▀▀ ▀▀")
 
 
 def _enable_windows_ansi() -> bool:
@@ -117,35 +121,9 @@ def width(maximum: int = 92) -> int:
     return max(40, min(cols - 4, maximum))
 
 
-def columns(style: Style, panels: list, gutter: int = 3) -> list:
-    """Lay labelled panels side by side, wrapping to one panel per row if the
-    terminal is too narrow to hold them."""
-    total = width()
-    count = max(1, len(panels))
-    each = (total - gutter * (count - 1)) // count
-    if each < 22:  # too cramped to be readable side by side
-        rows = []
-        for title, values in panels:
-            rows.append("  " + style.faint(title.upper()))
-            rows += [f"  {v}" for v in values]
-            rows.append("")
-        return rows[:-1]
-
-    depth = max(len(values) for _, values in panels)
-    rows = ["  " + (" " * gutter).join(style.faint(t.upper().ljust(each)) for t, _ in panels)]
-    for i in range(depth):
-        cells = []
-        for _, values in panels:
-            cell = values[i] if i < len(values) else ""
-            # Pad on the visible length, not the styled length -- escape codes
-            # have no width but do count in len().
-            cells.append(cell + " " * max(0, each - _visible_len(cell)))
-        rows.append("  " + (" " * gutter).join(cells))
-    return rows
-
-
 def _visible_len(text: str) -> int:
-    """Length ignoring ANSI escapes, so padded columns actually line up."""
+    """Length ignoring ANSI escapes, so padded rows actually line up. Escape
+    codes take no screen width but do count in len()."""
     out, i = 0, 0
     while i < len(text):
         if text[i] == "\033":
@@ -159,23 +137,98 @@ def _visible_len(text: str) -> int:
     return out
 
 
-def dashboard(style: Style, version: str, panels: list, commands: list) -> str:
-    """The screen you land on: what is loaded, what is cached, what it has saved,
-    and the commands -- all inline, no alternate screen."""
-    rule = style.faint(LINE * width())
-    tagline = style.faint("semantic cache in front of your LLM")
-    lines = [
-        "",
-        f"  {style.brand('semcache')} {style.faint('v' + version)}"
-        f"   {style.faint(DOT)}   {tagline}",
-        f"  {rule}",
-        "",
+def header(
+    style: Style,
+    version: str,
+    provider: str,
+    model: str,
+    home: str,
+    entries: int,
+    hit_rate: float,
+) -> str:
+    """Identity block: mark, name, what is loaded, and where it lives."""
+    mark = [style(row, "cyan") for row in LOGO]
+    facts = [
+        f"{style.brand('semcache')} {style.faint('v' + version)}",
+        f"{style.strong(provider)} {style.faint(DOT)} {model}",
+        style.faint(home),
     ]
+    lines = [""]
+    for i in range(3):
+        lines.append(f"  {mark[i]}   {facts[i]}")
+    lines.append("")
+
+    if entries:
+        noun = "answer" if entries == 1 else "answers"
+        tip = (
+            f"{style.hit(str(entries))} {noun} cached "
+            f"{style.faint(DOT)} {style.hit(f'{hit_rate * 100:.0f}%')} of questions "
+            f"answered without an API call so far."
+        )
+    else:
+        tip = style.faint(
+            "Nothing cached yet. Ask something, then ask it again in different words to see a hit."
+        )
+    lines.append(f"  {style(BAR, 'cyan')} {tip}")
+    lines.append(
+        f"  {style.faint('/help for commands')}  {style.faint(DOT)}  "
+        f"{style.faint('/dash for the dashboard')}"
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def columns(style: Style, panels: list, gutter: int = 3) -> list:
+    """Lay labelled panels side by side, collapsing to one per row when the
+    terminal is too narrow to hold them."""
+    total = width()
+    count = max(1, len(panels))
+    each = (total - gutter * (count - 1)) // count
+    if each < 22:  # too cramped to read side by side
+        rows: list = []
+        for title, values in panels:
+            rows.append("  " + style.faint(title.upper()))
+            rows += [f"  {v}" for v in values]
+            rows.append("")
+        return rows[:-1]
+
+    depth = max(len(values) for _, values in panels)
+    rows = ["  " + (" " * gutter).join(style.faint(t.upper().ljust(each)) for t, _ in panels)]
+    for i in range(depth):
+        cells = []
+        for _, values in panels:
+            cell = values[i] if i < len(values) else ""
+            cells.append(cell + " " * max(0, each - _visible_len(cell)))
+        rows.append("  " + (" " * gutter).join(cells))
+    return rows
+
+
+def dashboard(style: Style, panels: list, commands: list) -> str:
+    """The fuller view, on demand via /dash: panels plus the command guide."""
+    lines = [""]
     lines += columns(style, panels)
     lines += ["", f"  {style.faint('COMMANDS')}"]
     lines += [f"  {style.strong(cmd.ljust(8))} {style.faint(what)}" for cmd, what in commands]
-    lines += ["", f"  {style.faint('Type a question and press Enter.')}", ""]
+    lines.append("")
     return "\n".join(lines)
+
+
+def user_row(style: Style, text: str) -> str:
+    """The question, on a full-width reversed bar so it stands out as the turn
+    boundary when scrolling back."""
+    if not style.enabled:
+        return f"\n> {text}"
+    total = width()
+    lines = wrap(text, total - 4)
+    rendered = []
+    for line in lines:
+        padded = f" > {line}".ljust(total)
+        rendered.append("\033[7m" + padded + RESET)
+    return "\n" + "\n".join(rendered)
+
+
+def answer_marker(style: Style) -> str:
+    return style("●", "cyan") + " "
 
 
 def prompt(style: Style) -> str:

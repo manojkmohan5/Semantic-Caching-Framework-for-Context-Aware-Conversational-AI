@@ -29,7 +29,15 @@ from .providers import (
     detect_provider,
     needs_explicit_model,
 )
-from .ui import Style, dashboard, footer, redraw_last_line, user_block
+from .ui import (
+    Style,
+    answer_marker,
+    dashboard,
+    footer,
+    header,
+    redraw_last_line,
+    user_row,
+)
 from .ui import prompt as ui_prompt
 
 #: Resolved once at import; colour is dropped automatically when stdout is not a
@@ -385,11 +393,24 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
             ],
         ),
     ]
-    return dashboard(st, __version__, panels, list(COMMANDS))
+    return dashboard(st, panels, list(COMMANDS))
 
 
 def run_repl(cfg: Config, session: ChatSession) -> int:
-    out(_dashboard(cfg, session))
+    # Land on the identity block, not the full dashboard: it is what you read
+    # every launch, so it stays short. /dash opens the detailed panels.
+    lifetime = Aggregate.of(session.metrics.load_all())
+    out(
+        header(
+            STYLE,
+            __version__,
+            session.provider.name,
+            session.provider.model,
+            str(cfg.home),
+            session.cache.stats()["entries"],
+            lifetime.hit_rate,
+        )
+    )
     session.warm_async()
 
     while True:
@@ -422,7 +443,7 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
         # is no cursor control to rely on, so the echo is simply left as-is.
         if STYLE.enabled:
             sys.stdout.write(redraw_last_line())
-            out(user_block(STYLE, prompt))
+            out(user_row(STYLE, prompt))
 
         _answer(session, prompt)
 
@@ -459,19 +480,19 @@ def _answer(session: ChatSession, prompt: str) -> None:
 
     def on_chunk(piece: str) -> None:
         if not state["started"]:
-            # Clear the live line before the answer starts arriving.
-            sys.stdout.write("\r" + " " * 60 + "\r")
+            # Replace the live line with the answer marker, so the answer reads
+            # as a distinct block rather than continuing the status text.
+            sys.stdout.write(_erase_line() + "  " + answer_marker(STYLE))
             state["started"] = True
         sys.stdout.write(piece)
         sys.stdout.flush()
 
-    sys.stdout.write("  " + STYLE.faint("asking the model..."))
+    sys.stdout.write("  " + STYLE.faint("thinking..."))
     sys.stdout.flush()
     turn = session.ask(prompt, on_chunk=on_chunk)
     if not state["started"]:
-        sys.stdout.write("\r" + " " * 60 + "\r")
-    elapsed = time.perf_counter() - started
-    del elapsed
+        sys.stdout.write(_erase_line())
+    del started
 
     out("")
     out(status_line(turn))

@@ -15,6 +15,16 @@ API call, and every request is measured.
 
 from __future__ import annotations
 
+import os as _os
+
+# Set before anything can import huggingface_hub: its progress bars are decided
+# at import time, and a download bar from the background warm-up thread printed
+# straight through the dashboard.
+_os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+_os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+_os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+_os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 __version__ = "0.1.0"
 
 __all__ = ["SemCache", "Answer", "__version__"]
