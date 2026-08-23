@@ -288,12 +288,50 @@ def user_block(style: Style, text: str) -> str:
     return "\n".join([""] + [f"  {bar} {style.strong(line)}" for line in lines])
 
 
-def footer(style: Style, provider: str, model: str, entries: int, hit_rate: float) -> str:
-    """Dim strip under each answer: what is loaded, and how it is doing."""
-    left = f"{provider} {DOT} {model}"
-    right = f"{entries} cached {DOT} {hit_rate * 100:.0f}% hit rate"
-    gap = max(1, width() - len(left) - len(right))
-    return "  " + style.faint(left + " " * gap + right)
+def _compact(n: float) -> str:
+    """1234 -> 1.2k. Keeps the status bar one line on a narrow terminal."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return f"{n:.0f}"
+
+
+def status_bar(
+    style: Style,
+    model: str,
+    context_tokens: int,
+    context_window: int | None,
+    sent_tokens: int,
+    entries: int,
+    hit_rate: float,
+    saved_usd: float,
+) -> str:
+    """The strip that sits just above the input line.
+
+    Nothing can stay *below* the cursor in an inline REPL, so this is printed
+    immediately before the prompt -- visually attached to where you type.
+
+    "context" is what actually rides along on the next call: the retained
+    conversation turns. It is the number that costs money on every miss, which
+    is why it leads.
+    """
+    ctx = f"ctx {_compact(context_tokens)}"
+    if context_window:
+        ctx += f"/{_compact(context_window)} ({context_tokens / context_window * 100:.1f}%)"
+    else:
+        ctx += " tok"
+
+    left = f"{model}  {DOT}  {ctx}  {DOT}  sent {_compact(sent_tokens)}"
+    right = f"{entries} cached  {DOT}  {hit_rate * 100:.0f}% hit"
+    if saved_usd:
+        right += f"  {DOT}  saved ${saved_usd:.4f}"
+
+    total = width()
+    gap = total - len(left) - len(right)
+    if gap < 2:  # too narrow for one line; drop the least useful half
+        return "  " + style.faint(left)
+    return "  " + style.faint(left) + " " * gap + style.faint(right)
 
 
 def wrap(text: str, limit: int) -> list:

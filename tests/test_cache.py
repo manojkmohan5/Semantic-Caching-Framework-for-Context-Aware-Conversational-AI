@@ -684,50 +684,11 @@ def test_every_config_flag_actually_reaches_config():
         assert getattr(cfg, field) == expected, f"{argv[1]} did not reach {field}"
 
 
-def test_slash_model_switches_and_keeps_the_cache(tmp_path, monkeypatch):
-    """The cache namespace is keyed on the embedder, not the chat model, so
-    answers stay reusable whichever model wrote them."""
-    from semcache import cli
-    from semcache.ui import Style
-
-    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
-    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("must not prompt"))
-
-    cfg = Config.load(home=tmp_path, embedder="hash", offline=True, threshold=0.40)
-    session = cli.build_session(cfg, "", "stub", "stub-1")
-    session.ask("what causes 504 errors on large carts")
-    assert session.cache.stats()["entries"] == 1
-
-    cli.switch_model(cfg, session, "/model some-other-model")
-    assert session.provider.model == "some-other-model"
-
-    reused = session.ask("504 errors large carts what causes")
-    assert reused.from_cache, "a model switch must not invalidate the cache"
-    assert "answered by stub-1" in reused.note, "and should credit the original model"
-
-    # persisted, so the next launch starts on the new model
-    assert Config.load(home=tmp_path).model == "some-other-model"
-    session.cache.close()
+# ------------------------------------------------------------- the model picker
 
 
-def test_slash_model_with_no_argument_does_not_change_anything(tmp_path, monkeypatch):
-    from semcache import cli
-    from semcache.ui import Style
-
-    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
-    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "")  # user pressed Enter
-
-    cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
-    session = cli.build_session(cfg, "", "stub", "stub-1")
-    cli.switch_model(cfg, session, "/model")
-    assert session.provider.model == "stub-1"
-    session.cache.close()
-
-
-def test_slash_provider_switches_key_model_and_endpoint(tmp_path, monkeypatch):
-    """A whole different provider mid-session, with its own key -- and the cache
-    stays usable, because its namespace depends on the embedder, not on who
-    answered."""
+def _picker(tmp_path, monkeypatch, replies, key="sk-test"):
+    """A live session plus scripted answers for the picker prompts."""
     import getpass as getpass_mod
 
     from semcache import cli
@@ -735,44 +696,79 @@ def test_slash_provider_switches_key_model_and_endpoint(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
     monkeypatch.setattr(cli, "_interactive", lambda: True)
-    replies = iter(["openrouter", "z-ai/glm-5.2:free"])
-    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(replies))
-    monkeypatch.setattr(getpass_mod, "getpass", lambda *_a, **_k: "sk-or-v1-new")
+    feed = iter(replies)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: next(feed))
+    monkeypatch.setattr(getpass_mod, "getpass", lambda *_a, **_k: key)
 
     cfg = Config.load(
         home=tmp_path, embedder="hash", threshold=0.40, provider="stub", model="stub-1"
     )
     session = cli.build_session(cfg, "", "stub", "stub-1")
+    return cli, cfg, session
+
+
+def test_picker_selects_by_number_and_keeps_the_cache(tmp_path, monkeypatch):
+    """One list of provider/model pairs. /model used to be unable to reach
+    another provider, and /provider always re-asked for a key."""
+    cli, cfg, session = _picker(tmp_path, monkeypatch, ["anthropic", "1"])
     session.ask("what causes 504 errors on large carts")
 
-    cli.switch_provider(cfg, session, "/provider")
+    cli.pick_model(cfg, session, "/model")
 
-    assert session.provider.name == "openrouter"
-    assert session.provider.model == "z-ai/glm-5.2:free"
-    assert session.provider.api_key == "sk-or-v1-new"
-    assert session.provider.base_url == "https://openrouter.ai/api/v1"
-
+    assert session.provider.name == "anthropic"
+    assert session.provider.model in {m.id for m in cli.CATALOG["anthropic"]}
     reused = session.ask("504 errors large carts what causes")
-    assert reused.from_cache, "a provider switch must not invalidate the cache"
-
-    saved = Config.load(home=tmp_path)
-    assert (saved.provider, saved.model) == ("openrouter", "z-ai/glm-5.2:free")
-    # the key is written under the generic var for compatible hosts
-    assert "sk-or-v1-new" in cfg.env_path.read_text(encoding="utf-8")
+    assert reused.from_cache, "switching provider must not invalidate the cache"
     session.cache.close()
 
 
-def test_slash_provider_refuses_in_offline_mode(tmp_path, monkeypatch):
-    """build_provider always returns the stub offline, so a 'switch' would report
-    a provider that is not actually in use."""
+def test_picker_accepts_provider_slash_model_directly(tmp_path, monkeypatch):
+    cli, cfg, session = _picker(tmp_path, monkeypatch, [])
+    cli.pick_model(cfg, session, "/model openrouter/z-ai/glm-5.2:free")
+    assert session.provider.name == "openrouter"
+    assert session.provider.model == "z-ai/glm-5.2:free"
+    assert session.provider.base_url == "https://openrouter.ai/api/v1"
+    assert Config.load(home=tmp_path).model == "z-ai/glm-5.2:free"
+    session.cache.close()
+
+
+def test_picker_text_filters_then_selects(tmp_path, monkeypatch):
+    """Free text narrows the list instead of being treated as a bad number."""
+    cli, cfg, session = _picker(tmp_path, monkeypatch, ["haiku", "1"])
+    cli.pick_model(cfg, session, "/model")
+    assert session.provider.name == "anthropic"
+    assert "haiku" in session.provider.model
+    session.cache.close()
+
+
+def test_picker_reuses_a_key_already_in_the_environment(tmp_path, monkeypatch):
+    import getpass as getpass_mod
+
+    cli, cfg, session = _picker(tmp_path, monkeypatch, ["anthropic", "1"])
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-from-env")
+    monkeypatch.setattr(
+        getpass_mod, "getpass", lambda *_a, **_k: pytest.fail("must not ask for a key")
+    )
+    cli.pick_model(cfg, session, "/model")
+    assert session.provider.api_key == "sk-ant-from-env"
+    session.cache.close()
+
+
+def test_picker_enter_cancels(tmp_path, monkeypatch):
+    cli, cfg, session = _picker(tmp_path, monkeypatch, [""])
+    cli.pick_model(cfg, session, "/model")
+    assert session.provider.name == "stub"
+    session.cache.close()
+
+
+def test_picker_refuses_in_offline_mode(tmp_path, monkeypatch):
     from semcache import cli
     from semcache.ui import Style
 
     monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
     monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("must not prompt"))
-
     cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
     session = cli.build_session(cfg, "", "stub", "stub-1")
-    cli.switch_provider(cfg, session, "/provider")
+    cli.pick_model(cfg, session, "/model")
     assert session.provider.name == "stub"
     session.cache.close()

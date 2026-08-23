@@ -65,6 +65,20 @@ OPENAI_COMPATIBLE = {
     "custom": "",  # requires --base-url
 }
 
+#: Input context windows, only for models we can state with confidence. Anything
+#: absent shows raw token counts instead of a percentage -- an invented window
+#: would make the status bar lie.
+CONTEXT_WINDOWS = {
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-haiku-4-5": 200_000,
+}
+
+
+def context_window(model: str) -> int | None:
+    return CONTEXT_WINDOWS.get(model)
+
+
 EMBEDDING_MODELS = {
     "openai": ("text-embedding-3-small", 1536),
     "gemini": ("gemini-embedding-001", 3072),

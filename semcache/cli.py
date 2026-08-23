@@ -26,6 +26,7 @@ from .providers import (
     ProviderError,
     all_provider_names,
     build_provider,
+    context_window,
     default_model,
     detect_provider,
     needs_explicit_model,
@@ -34,9 +35,9 @@ from .ui import (
     Style,
     answer_marker,
     dashboard,
-    footer,
     header,
     redraw_last_line,
+    status_bar,
     user_row,
 )
 from .ui import prompt as ui_prompt
@@ -46,6 +47,9 @@ from .ui import prompt as ui_prompt
 STYLE = Style()
 
 DOT_SEP = "·"
+
+#: Local servers that accept any key, so the picker must not claim they need one.
+LOCAL_PROVIDERS = {"ollama", "lmstudio"}
 
 KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -415,151 +419,199 @@ def _dashboard(cfg: Config, session: ChatSession) -> str:
     return dashboard(st, panels, list(COMMANDS))
 
 
-def switch_provider(cfg: Config, session: ChatSession, typed: str) -> None:
-    """Move the session to a different provider, with its own key and model.
+class Choice:
+    """One selectable row in the picker."""
 
-    Rebuilds the provider in place. The cache is untouched for the same reason a
-    model switch leaves it alone: its namespace depends on the embedder, not on
-    who answers.
+    __slots__ = ("provider", "model", "price", "has_key", "is_current")
+
+    def __init__(self, provider, model, price="", has_key=False, is_current=False):
+        self.provider = provider
+        self.model = model  # None means "ask for the model name"
+        self.price = price
+        self.has_key = has_key
+        self.is_current = is_current
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider}/{self.model}" if self.model else self.provider
+
+
+def _available_key(cfg: Config, provider: str, session: ChatSession) -> str:
+    """A key we can already use for this provider, if any."""
+    if session.provider.name == provider and session.provider.api_key:
+        return session.provider.api_key
+    var = KEY_ENV.get(provider)
+    if var and os.environ.get(var):
+        return os.environ[var]
+    # Compatible hosts share the generic variable, so only offer it when the
+    # saved provider matches -- otherwise a DeepSeek key would be handed to Kimi.
+    if cfg.provider == provider and os.environ.get("SEMCACHE_API_KEY"):
+        return os.environ["SEMCACHE_API_KEY"]
+    return ""
+
+
+def build_choices(cfg: Config, session: ChatSession) -> list:
+    """Every provider/model pair worth offering, current provider first."""
+    current = (session.provider.name, session.provider.model)
+    choices: list = []
+    for provider in all_provider_names():
+        key = _available_key(cfg, provider, session)
+        models = CATALOG.get(provider, [])
+        if models:
+            for info in models:
+                price = (
+                    f"${info.price_in:.2f}/${info.price_out:.2f} per Mtok"
+                    if info.price_in is not None
+                    else ""
+                )
+                choices.append(
+                    Choice(provider, info.id, price, bool(key), (provider, info.id) == current)
+                )
+        else:
+            # No catalogue: offer the provider, and the model it is on right now.
+            model = session.provider.model if session.provider.name == provider else None
+            choices.append(Choice(provider, model, "", bool(key), (provider, model) == current))
+    choices.sort(key=lambda c: (not c.is_current, not c.has_key, c.provider))
+    return choices
+
+
+def _render(choices: list, query: str) -> None:
+    out("")
+    if query:
+        out(f"  {STYLE.faint('filter: ' + query)}")
+    shown_provider = None
+    for i, choice in enumerate(choices, 1):
+        if choice.provider != shown_provider:
+            shown_provider = choice.provider
+            if choice.provider in LOCAL_PROVIDERS:
+                tag = STYLE.faint("local, no key needed")
+            else:
+                tag = STYLE.hit("key set") if choice.has_key else STYLE.faint("needs a key")
+            out(f"  {STYLE.strong(choice.provider.upper())}  {tag}")
+        name = choice.model or STYLE.faint("(choose a model)")
+        marker = STYLE.hit("  <- current") if choice.is_current else ""
+        price = STYLE.faint(choice.price) if choice.price else ""
+        out(f"   {i:>3}  {name:<34} {price}{marker}")
+    if not choices:
+        out(f"  {STYLE.faint('nothing matches')}")
+
+
+def pick_model(cfg: Config, session: ChatSession, typed: str) -> None:
+    """One picker for provider, key and model.
+
+    /model and /provider were separate commands doing overlapping work, which
+    made switching confusing: /model could not reach another provider, and
+    /provider always re-asked for a key. This lists every provider/model pair
+    together -- the way a model picker should work -- and only asks for a key
+    when the chosen provider does not already have one.
+
+    Accepts a number, free text to filter, or a direct "provider/model".
     """
     if cfg.offline:
-        # build_provider always returns the stub in offline mode, so a "switch"
-        # would report a provider that is not actually being used.
         out("  " + STYLE.faint("offline mode always uses the built-in stub model."))
         out("  " + STYLE.faint("restart without --offline to use a real provider."))
         return
 
-    names = all_provider_names()
+    all_choices = build_choices(cfg, session)
     parts = typed.split(maxsplit=1)
-    wanted = parts[1].strip().lower() if len(parts) > 1 else ""
+    query = parts[1].strip() if len(parts) > 1 else ""
 
-    if wanted not in names:
-        out("")
-        out(f"  Current: {STYLE.strong(session.provider.name)}")
-        for i, name in enumerate(names, 1):
-            marker = STYLE.hit(" ← current") if name == session.provider.name else ""
-            out(f"    {i:>2}) {name}{marker}")
-        choice = _prompt(f"  Provider [1-{len(names)} or a name]: ").lower()
-        if not choice:
-            return
-        if choice.isdigit() and 1 <= int(choice) <= len(names):
-            wanted = names[int(choice) - 1]
-        elif choice in names:
-            wanted = choice
-        else:
-            out(f"  {STYLE.error('unknown provider ' + choice)}")
+    # A direct "provider/model" argument skips the list entirely.
+    if query and "/" in query and " " not in query:
+        provider, _, model = query.partition("/")
+        if provider.lower() in all_provider_names():
+            _apply(cfg, session, Choice(provider.lower(), model))
             return
 
-    # Reuse a key already in the environment for that provider rather than
-    # making the user paste one they have already configured.
-    existing = os.environ.get(KEY_ENV.get(wanted, "")) or ""
-    key = ""
-    if existing:
-        answer = _prompt(f"  Use the {KEY_ENV[wanted]} already set? [Y/n] ", "y").lower()
-        if answer in ("", "y", "yes"):
-            key = existing
+    if not _interactive():
+        out("  " + STYLE.faint("no terminal to choose from; pass --provider and --model."))
+        return
+
+    while True:
+        matches = (
+            [c for c in all_choices if query.lower() in c.label.lower()] if query else all_choices
+        )
+        _render(matches, query)
+        answer = _prompt(f"  {STYLE.faint('number, text to filter, or Enter to cancel')} > ")
+        if not answer:
+            return
+        if answer.isdigit():
+            index = int(answer)
+            if 1 <= index <= len(matches):
+                _apply(cfg, session, matches[index - 1])
+                return
+            out(f"  {STYLE.error('no such number')}")
+            continue
+        if "/" in answer and answer.partition("/")[0].lower() in all_provider_names():
+            provider, _, model = answer.partition("/")
+            _apply(cfg, session, Choice(provider.lower(), model))
+            return
+        query = answer  # treat anything else as a new filter
+
+
+def _apply(cfg: Config, session: ChatSession, choice: Choice) -> None:
+    """Switch to a chosen provider/model, asking only for what is missing."""
+    provider = choice.provider
+    key = _available_key(cfg, provider, session)
     if not key:
         out(f"  {STYLE.faint('the paste stays hidden, so nothing appears as you type')}")
         try:
-            key = getpass.getpass(f"  Paste your {wanted} API key (hidden): ").strip()
+            key = getpass.getpass(f"  {provider} API key: ").strip()
         except (EOFError, KeyboardInterrupt):
             out("")
             return
-    if not key:
-        out("  No key given, staying on " + STYLE.strong(session.provider.name))
-        return
-
-    base_url = None
-    if wanted == "custom":
-        base_url = _prompt("  Base URL (https://host/v1): ")
-        if not base_url:
-            out("  custom needs a base URL, staying put.")
+        if not key:
+            out("  " + STYLE.faint("no key given, staying put"))
             return
 
-    # A fresh Config so the new provider's model prompt and base_url apply.
-    moved = replace(cfg, provider=wanted, model=None, base_url=base_url or cfg.base_url)
+    base_url = cfg.base_url
+    if provider == "custom" and not base_url:
+        base_url = _prompt("  Base URL (https://host/v1): ")
+        if not base_url:
+            out("  " + STYLE.faint("custom needs a base URL, staying put"))
+            return
+
+    model = choice.model
+    moved = replace(cfg, provider=provider, model=model, base_url=base_url)
     try:
-        model = choose_model(moved, wanted)
-        session.provider = build_provider(wanted, key, model, moved)
+        if not model:
+            model = choose_model(moved, provider)
+            moved = replace(moved, model=model)
+        session.provider = build_provider(provider, key, model, moved)
     except (ProviderError, SystemExit) as exc:
         out(f"  {STYLE.error(str(exc))}")
         return
 
-    cfg.provider, cfg.model = wanted, model
-    if base_url:
-        cfg.base_url = base_url
-    _persist_model(cfg, wanted, model)
-    _save_key(cfg, key, wanted)
-    out(
-        f"  {STYLE.hit('switched')} to {STYLE.strong(wanted)} "
-        f"{STYLE.faint(DOT_SEP)} {STYLE.strong(model)}"
-    )
+    was = f"{cfg.provider or 'none'}/{cfg.model or 'none'}"
+    cfg.provider, cfg.model, cfg.base_url = provider, model, base_url
+    _persist_model(cfg, provider, model)
+    _save_key(cfg, key, provider)
+    out(f"  {STYLE.hit('switched')} {STYLE.faint(was)} -> {STYLE.strong(provider + '/' + model)}")
     out(
         "  "
         + STYLE.faint(
-            f"{session.cache.stats()['entries']} cached answers are still available "
-            "-- the cache does not care which provider answered."
+            f"{session.cache.stats()['entries']} cached answers still apply "
+            "-- the cache does not depend on who answers."
         )
     )
 
 
-def switch_model(cfg: Config, session: ChatSession, typed: str) -> None:
-    """Change the chat model without restarting, and without losing the cache.
-
-    The cache survives on purpose: its namespace is keyed on the *embedder*, not
-    the chat model, so answers stay reusable whichever model wrote them. An entry
-    written by a different model is still served, and the status line says which
-    model produced it.
-    """
-    provider = session.provider.name
-    parts = typed.split(maxsplit=1)
-    wanted = parts[1].strip() if len(parts) > 1 else ""
-
-    options = CATALOG.get(provider, [])
-    if not wanted:
-        out("")
-        if options:
-            for i, info in enumerate(options, 1):
-                price = (
-                    f"${info.price_in:.2f}/${info.price_out:.2f} per Mtok"
-                    if info.price_in is not None
-                    else "price not tracked"
-                )
-                marker = STYLE.hit(" ← current") if info.id == session.provider.model else ""
-                out(f"    {i}) {info.id:<22} {STYLE.faint(price)}{marker}")
-            choice = _prompt(f"  Model [1-{len(options)} or a name]: ")
-            if not choice:
-                return
-            wanted = (
-                options[int(choice) - 1].id
-                if choice.isdigit() and 1 <= int(choice) <= len(options)
-                else choice
-            )
-        else:
-            example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
-            out(f"  Current: {STYLE.strong(session.provider.model)}")
-            out(f"  {STYLE.faint('Example: ' + example)}")
-            wanted = _prompt("  Model: ")
-            if not wanted:
-                return
-
-    if wanted == session.provider.model:
-        out(f"  Already using {STYLE.strong(wanted)}.")
-        return
-
-    previous = session.provider.model
-    session.provider.model = wanted
-    _persist_model(cfg, provider, wanted)
-    out(
-        f"  {STYLE.hit('switched')} {STYLE.faint(previous)} "
-        f"{STYLE.faint('->')} {STYLE.strong(wanted)}"
-    )
-    out(
-        "  "
-        + STYLE.faint(
-            f"{session.cache.stats()['entries']} cached answers are still available "
-            "-- the cache is shared across models."
-        )
+def _status_bar(session: ChatSession) -> str:
+    """Render the bar that sits directly above the input line."""
+    agg = session.metrics.aggregate()
+    stats = session.cache.stats()
+    # What actually rides along on the next call, in the same len/4 estimate the
+    # rest of the tool uses for tokens.
+    held = sum(len(turn["content"]) for turn in session._sendable_history()) // 4
+    return status_bar(
+        STYLE,
+        session.provider.model,
+        held,
+        context_window(session.provider.model),
+        agg.tokens_sent_in + agg.tokens_sent_out,
+        stats["entries"],
+        agg.hit_rate,
+        agg.cost_saved,
     )
 
 
@@ -582,7 +634,9 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
 
     while True:
         try:
-            prompt = input("\n" + ui_prompt(STYLE)).strip()
+            out("")
+            out(_status_bar(session))
+            prompt = input(ui_prompt(STYLE)).strip()
         except (EOFError, KeyboardInterrupt):
             out("")
             break
@@ -607,8 +661,8 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
         if lowered in ("/dash", "/dashboard"):
             out(_dashboard(cfg, session))
             continue
-        if lowered.split()[0] in ("/model", "/models"):
-            switch_model(cfg, session, prompt)
+        if lowered.split()[0] in ("/model", "/models", "/provider", "/key"):
+            pick_model(cfg, session, prompt)
             continue
 
         # Re-render the question as a framed block. The terminal already echoed
@@ -619,17 +673,6 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
             out(user_row(STYLE, prompt))
 
         _answer(session, prompt)
-
-        stats = session.cache.stats()
-        out(
-            footer(
-                STYLE,
-                session.provider.name,
-                session.provider.model,
-                stats["entries"],
-                session.metrics.aggregate().hit_rate,
-            )
-        )
 
     # Read the count BEFORE closing: close() shuts the SQLite connection, and
     # querying it afterwards raised ProgrammingError, so every clean /exit ended
