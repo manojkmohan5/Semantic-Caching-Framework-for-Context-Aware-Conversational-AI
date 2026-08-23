@@ -772,3 +772,59 @@ def test_picker_refuses_in_offline_mode(tmp_path, monkeypatch):
     cli.pick_model(cfg, session, "/model")
     assert session.provider.name == "stub"
     session.cache.close()
+
+
+def test_exit_is_never_accepted_as_a_model_name(tmp_path, monkeypatch):
+    """Typing "exit" at a model prompt wrote {"model": "exit"} into config.json,
+    which then poisoned every later launch."""
+    from semcache import cli
+    from semcache.ui import Style
+
+    monkeypatch.setattr(cli, "STYLE", Style(enabled=False))
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+
+    for word in ("exit", "quit", "q", "/exit", "cancel"):
+        monkeypatch.setattr("builtins.input", (lambda w: lambda *_a, **_k: w)(word))
+        cfg = Config.load(home=tmp_path, provider="openrouter", model=None)
+        with pytest.raises(SystemExit):
+            cli.choose_model(cfg, "openrouter")
+
+        # and the picker treats it as cancel rather than a name
+        assert cli._ask_model(cfg, "openrouter", "k", "http://127.0.0.1:1/v1") == ""
+
+
+def test_empty_cache_reports_answers_held_under_another_embedder(tmp_path):
+    """Changing the embedding model starts a fresh namespace on purpose, but that
+    made a cache full of paid-for answers look simply empty."""
+    first = make_cache(tmp_path)
+    add(first, "a question worth money", "the answer")
+    assert first.store.count() == 1
+    first.close()
+
+    class Other(HashEmbedder):
+        id = "local:some-other-model"
+        dim = 128
+
+        def encode(self, texts):
+            return l2_normalize(np.ones((len(texts), self.dim), dtype="float32"))
+
+    cfg = Config.load(home=tmp_path, embedder="hash", offline=True)
+    second = SemanticCache(cfg, Other())
+    assert second.stats()["entries"] == 0, "a different embedder sees a fresh namespace"
+    stranded = second.store.other_namespaces()
+    assert stranded, "but the earlier answers must still be discoverable"
+    assert stranded[0][1] == 1
+    second.close()
+
+
+def test_auto_embedder_honours_the_configured_model(tmp_path):
+    """The "auto" branch ignored embed_model and always built the default, so a
+    configured embedder was silently wrong -- and the cache under the intended
+    one looked empty."""
+    from semcache.embedders import build_embedder
+
+    cfg = Config.load(home=tmp_path, embedder="auto", embed_model="BAAI/bge-small-en-v1.5")
+    assert build_embedder(cfg).id == "local:BAAI/bge-small-en-v1.5"
+
+    explicit = Config.load(home=tmp_path, embedder="local", embed_model="BAAI/bge-small-en-v1.5")
+    assert build_embedder(explicit).id == "local:BAAI/bge-small-en-v1.5"

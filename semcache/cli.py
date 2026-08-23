@@ -52,6 +52,10 @@ DOT_SEP = "·"
 #: Local servers that accept any key, so the picker must not claim they need one.
 LOCAL_PROVIDERS = {"lmstudio"}
 
+#: Typed at a "which model?" prompt these mean cancel. Accepting them as model
+#: names wrote {"model": "exit"} into config.json, which then broke every launch.
+CANCEL_WORDS = {"exit", "quit", "q", "cancel", "/exit", "/quit", "/cancel", "back"}
+
 KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -207,7 +211,7 @@ def choose_model(cfg: Config, provider: str) -> str:
         out("")
         out(f"  Which {provider} model? Example: {example}")
         typed = _prompt("  Model: ")
-        if not typed:
+        if not typed or typed.lower() in CANCEL_WORDS:
             raise SystemExit(f"{provider} needs a model name. Pass --model {example}")
         return typed
     if not _interactive():
@@ -573,7 +577,8 @@ def _ask_model(cfg: Config, provider: str, key: str, base_url: str | None) -> st
     example = _MODEL_EXAMPLES.get(provider, "the provider's model id")
     out("  " + STYLE.faint(f"could not reach {provider}; enter a model name"))
     out("  " + STYLE.faint(f"example: {example}"))
-    return _prompt("  Model: ")
+    typed = _prompt("  Model: ")
+    return "" if typed.lower() in CANCEL_WORDS else typed
 
 
 def _apply(cfg: Config, session: ChatSession, choice: Choice) -> None:
@@ -659,6 +664,21 @@ def run_repl(cfg: Config, session: ChatSession) -> int:
             lifetime.hit_rate,
         )
     )
+    # An empty cache next to a populated one under another embedder is
+    # confusing, so say where the answers went and how to reach them.
+    if session.cache.stats()["entries"] == 0:
+        for embedder, count in session.cache.store.other_namespaces()[:2]:
+            if embedder.startswith("local:") or embedder.startswith("api:"):
+                model = embedder.split(":", 1)[1]
+                out(
+                    "  "
+                    + STYLE.warn(
+                        f"{count} answers are stored under a different embedding model ({model})."
+                    )
+                )
+                out("  " + STYLE.faint(f"to use them: semcache --embed-model {model}"))
+                out("")
+
     session.warm_async()
 
     while True:

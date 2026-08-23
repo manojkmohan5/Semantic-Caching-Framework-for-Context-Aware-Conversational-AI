@@ -155,7 +155,7 @@ def build_embedder(cfg, provider=None) -> Embedder:
     if choice == "hash":
         return HashEmbedder()
     if choice == "local":
-        return LocalEmbedder(cache_dir=cfg.models_dir)
+        return LocalEmbedder(_model_of(cfg), cache_dir=cfg.models_dir)
     if choice == "api":
         return ApiEmbedder(provider)
 
@@ -169,7 +169,7 @@ def build_embedder(cfg, provider=None) -> Embedder:
     try:
         import fastembed  # noqa: F401
 
-        return LocalEmbedder(cache_dir=cfg.models_dir)
+        return LocalEmbedder(_model_of(cfg), cache_dir=cfg.models_dir)
     except ImportError:
         pass
     if provider is not None and getattr(provider, "name", "") in EMBEDDING_MODELS:

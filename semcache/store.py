@@ -210,6 +210,20 @@ class Store:
         )
         return [(p, int(h)) for p, h in cur]
 
+    def other_namespaces(self) -> list:
+        """(embedder, count) for entries stored under a *different* namespace.
+
+        Changing the embedding model starts a fresh namespace on purpose --
+        vectors of different models are not comparable -- but that made a cache
+        full of paid-for answers look empty with no explanation.
+        """
+        cur = self.db.execute(
+            "SELECT embedder, COUNT(*) FROM entries WHERE namespace != ?"
+            " GROUP BY embedder ORDER BY COUNT(*) DESC",
+            (self.namespace,),
+        )
+        return [(name or "unknown", int(n)) for name, n in cur]
+
     def size_bytes(self) -> int:
         try:
             return self.path.stat().st_size

@@ -6,7 +6,6 @@ This is the whole product. Everything else in the package serves this file.
 from __future__ import annotations
 
 import contextlib
-import os
 import re
 import threading
 import time
@@ -81,17 +80,16 @@ class ChatSession:
         one-time cost never shows up as latency on a real question."""
 
         def _warm():
-            # Silence the thread entirely. Model loaders print download bars and
-            # warnings, and a background write lands in the middle of whatever
-            # the REPL is drawing. A failed warm-up just means the first encode
-            # pays the load cost instead.
-            # ExitStack rather than a parenthesised with-group: that syntax is
-            # Python 3.10+, and this package supports 3.9.
-            with contextlib.ExitStack() as stack:
-                stack.enter_context(contextlib.suppress(Exception))
-                sink = stack.enter_context(open(os.devnull, "w"))
-                stack.enter_context(contextlib.redirect_stdout(sink))
-                stack.enter_context(contextlib.redirect_stderr(sink))
+            # Deliberately NOT contextlib.redirect_stdout here. It swaps
+            # sys.stdout for the whole *process*, not this thread, so while the
+            # model loaded it swallowed the main thread's output too -- the status
+            # bar and the input prompt vanished and the REPL looked dead or
+            # finished. Loader noise is suppressed at the source instead, by the
+            # HF_HUB_* environment variables set in semcache/__init__.py before
+            # anything can import huggingface_hub.
+            #
+            # A failed warm-up just means the first encode pays the load cost.
+            with contextlib.suppress(Exception):
                 self.embedder.warm()
 
         self._warm_thread = threading.Thread(target=_warm, daemon=True)
